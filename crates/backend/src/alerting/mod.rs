@@ -10,4 +10,4 @@ pub use email::EmailChannel;
 pub use telegram::TelegramChannel;
 pub use throttler::AlertThrottler;
 pub use traits::NotificationChannel;
-pub use webhook::WebhookChannel;
+pub use webhook::{is_private_or_restricted_ip, validate_webhook_url, WebhookChannel};

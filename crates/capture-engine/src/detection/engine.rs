@@ -1,12 +1,15 @@
-use common::models::{Alert, DetectionRule as RuleModel, TrafficEvent};
+use common::models::{Alert, AlertSeverity, DetectionRule as RuleModel, TrafficEvent};
+use ipnetwork::IpNetwork;
 use sqlx::PgPool;
 use std::sync::Arc;
-use tokio::sync::mpsc::{self, Receiver, Sender};
+use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{error, info, warn};
 
 use super::arp_spoof::ArpSpoofDetector;
+use super::beaconing::BeaconingDetector;
 use super::brute_force::BruteForceDetector;
 use super::dns_tunneling::DnsTunnelDetector;
+use super::icmp_flood::IcmpFloodDetector;
 use super::port_scan::PortScanDetector;
 use super::syn_flood::SynFloodDetector;
 use super::zscore_anomaly::ZScoreAnomalyDetector;
@@ -26,9 +29,55 @@ impl DetectionEngine {
             Box::new(ArpSpoofDetector::new()),
             Box::new(DnsTunnelDetector::new(3.8, 30)),
             Box::new(ZScoreAnomalyDetector::new(3.0, 100)),
+            Box::new(IcmpFloodDetector::new(50, 5)),
+            Box::new(BeaconingDetector::new(6, 0.15)),
         ];
 
         Self { rules, alert_tx }
+    }
+
+    /// Snapshot all rules state to JSON
+    pub fn snapshot_state(&self) -> serde_json::Value {
+        let mut map = serde_json::Map::new();
+        for rule in &self.rules {
+            if let Some(state) = rule.export_state() {
+                map.insert(rule.name().to_string(), state);
+            }
+        }
+        serde_json::Value::Object(map)
+    }
+
+    /// Restore all rules state from JSON
+    pub fn restore_state(&mut self, state: &serde_json::Value) {
+        if let Some(obj) = state.as_object() {
+            for rule in &mut self.rules {
+                if let Some(rule_state) = obj.get(rule.name()) {
+                    rule.import_state(rule_state);
+                    info!("Restored persisted state for rule: {}", rule.name());
+                }
+            }
+        }
+    }
+
+    /// Save state to file
+    pub fn save_state_to_file(&self, path: &str) -> Result<(), std::io::Error> {
+        let json = self.snapshot_state();
+        let content = serde_json::to_string_pretty(&json)?;
+        std::fs::write(path, content)?;
+        info!("Saved rule state snapshot to {}", path);
+        Ok(())
+    }
+
+    /// Load state from file
+    pub fn load_state_from_file(&mut self, path: &str) -> Result<(), std::io::Error> {
+        if std::path::Path::new(path).exists() {
+            let content = std::fs::read_to_string(path)?;
+            if let Ok(json) = serde_json::from_str(&content) {
+                self.restore_state(&json);
+                info!("Loaded rule state snapshot from {}", path);
+            }
+        }
+        Ok(())
     }
 
     /// Update detection rules dynamically from database configuration
@@ -78,10 +127,84 @@ impl DetectionEngine {
     }
 }
 
-/// Spawns background task to persist alerts to PostgreSQL and dispatch them
+/// Helper to trigger active OS firewall blocking (iptables / nftables)
+pub async fn apply_os_firewall_block(ip: IpNetwork) {
+    let ip_str = ip.ip().to_string();
+    info!("🛡️ [AUTO-RESPONSE FIREWALL] Auto-blocking malicious IP {} via OS firewall", ip_str);
+
+    // 1. Try nftables
+    let nft_result = tokio::process::Command::new("nft")
+        .args(["add", "element", "inet", "filter", "secnet_blocklist", &format!("{{ {} }}", ip_str)])
+        .output()
+        .await;
+
+    if let Ok(out) = nft_result {
+        if out.status.success() {
+            info!("✅ Successfully blocked IP {} via nftables", ip_str);
+            return;
+        }
+    }
+
+    // 2. Fallback to iptables
+    let is_ipv6 = ip.is_ipv6();
+    let iptables_cmd = if is_ipv6 { "ip6tables" } else { "iptables" };
+    let ipt_result = tokio::process::Command::new(iptables_cmd)
+        .args(["-I", "INPUT", "-s", &ip_str, "-j", "DROP"])
+        .output()
+        .await;
+
+    match ipt_result {
+        Ok(out) if out.status.success() => {
+            info!("✅ Successfully blocked IP {} via {}", ip_str, iptables_cmd);
+        }
+        Ok(out) => {
+            let err = String::from_utf8_lossy(&out.stderr);
+            warn!("⚠️ Firewall command failed (status: {}): {}. Running without CAP_NET_ADMIN/root?", out.status, err.trim());
+        }
+        Err(e) => {
+            warn!("⚠️ Firewall command execution failed: {}. Continuing with database blocklist.", e);
+        }
+    }
+}
+
+/// Spawns background task to persist alerts to PostgreSQL, auto-block critical attackers, and dispatch them
 pub fn spawn_alert_persister(mut alert_rx: Receiver<Alert>, pool: Option<Arc<PgPool>>) {
+    let auto_block_enabled = std::env::var("AUTO_BLOCK_CRITICAL_IPS")
+        .map(|v| v != "false" && v != "0")
+        .unwrap_or(true);
+
     tokio::spawn(async move {
         while let Some(alert) = alert_rx.recv().await {
+            // Auto-Response: If alert is Critical, auto-block attacker IP
+            if auto_block_enabled && alert.severity == AlertSeverity::Critical {
+                info!("🚨 [AUTO-RESPONSE] Critical threat identified! Initiating automated response for IP {}", alert.src_ip);
+
+                // 1. Apply OS firewall block
+                apply_os_firewall_block(alert.src_ip).await;
+
+                // 2. Insert into database blocked_ips table
+                if let Some(ref pool) = pool {
+                    let block_reason = format!("Auto-blocked by SecNet IPS due to Critical Alert: {}", alert.title);
+                    let block_res = sqlx::query!(
+                        r#"
+                        INSERT INTO blocked_ips (ip_address, reason, blocked_until)
+                        VALUES ($1, $2, CURRENT_TIMESTAMP + INTERVAL '2 hours')
+                        ON CONFLICT (ip_address) DO UPDATE SET blocked_until = CURRENT_TIMESTAMP + INTERVAL '2 hours'
+                        "#,
+                        alert.src_ip,
+                        block_reason
+                    )
+                    .execute(pool.as_ref())
+                    .await;
+
+                    if let Err(e) = block_res {
+                        warn!("Failed to auto-insert IP into blocked_ips table: {}", e);
+                    } else {
+                        info!("🔒 Malicious IP {} registered in blocked_ips table (2h lockout)", alert.src_ip);
+                    }
+                }
+            }
+
             if let Some(ref pool) = pool {
                 let result = sqlx::query(
                     r#"
@@ -110,3 +233,4 @@ pub fn spawn_alert_persister(mut alert_rx: Receiver<Alert>, pool: Option<Arc<PgP
         }
     });
 }
+

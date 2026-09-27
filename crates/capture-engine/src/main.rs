@@ -49,6 +49,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize detection engine
     let mut engine = DetectionEngine::new(alert_tx);
 
+    let state_file = std::env::var("RULES_STATE_FILE")
+        .unwrap_or_else(|_| "/tmp/secnet_rules_state.json".to_string());
+    if let Err(e) = engine.load_state_from_file(&state_file) {
+        warn!("Could not load rules state from {}: {}", state_file, e);
+    }
+
     if let Some(ref p) = pool {
         if let Err(e) = engine.reload_rules_from_db(p.as_ref()).await {
             warn!("Could not load rules from DB, using defaults: {}", e);
@@ -129,5 +135,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Keep the main process running
     tokio::signal::ctrl_c().await?;
     info!("Shutting down detection engine gracefully.");
+    if let Err(e) = engine.save_state_to_file(&state_file) {
+        warn!("Could not save rules state to {}: {}", state_file, e);
+    }
     Ok(())
 }
+

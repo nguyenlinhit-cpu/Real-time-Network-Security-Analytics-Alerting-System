@@ -300,6 +300,3 @@ Khi chạy các kịch bản trên:
 - [x] **Phase 4 (Hệ thống Cảnh báo Đa kênh):** Kênh Email (`lettre`), Telegram Bot, Webhook, cơ chế chống bão cảnh báo `AlertThrottler` (cooldown 60s), audit log dispatch.
 - [x] **Phase 5 (Frontend Dashboard Leptos WASM):** 7 trang chức năng hoàn chỉnh, REST API client, WebSocket auto-reconnect client, biểu đồ SVG thời gian thực, audio alarm Web Audio API, responsive Tailwind CSS Dark Mode.
 - [x] **Phase 6 (Bảo mật OWASP Top 10 & Hoàn thiện):** Resource ownership enforcement, bảo vệ chống brute force & account lockout 15 phút, sanitize thông báo lỗi, correlation ID `x-request-id`, Prometheus `/metrics`, Docker non-root user, bảo vệ chống SSRF.
-=======
-# Real-time-Network-Security-Analytics-Alerting-System
->>>>>>> 08f986271187ea94da73a5dc3e8e98dc917710d6

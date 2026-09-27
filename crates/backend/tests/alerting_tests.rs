@@ -46,7 +46,8 @@ async fn test_webhook_channel_dispatch() {
         "http://127.0.0.1:9999/dummy-webhook".to_string(),
     );
     
-    // Webhook should handle connection refusal gracefully without panicking
+    // Webhook rejects loopback IP 127.0.0.1 due to SSRF protection
     let result = webhook.send(&alert).await;
-    assert!(result.is_ok());
+    assert!(result.is_err(), "Loopback webhook target must be rejected by SSRF protection");
 }
+

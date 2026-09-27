@@ -3,7 +3,7 @@ use axum::{
     Json,
 };
 use common::models::{
-    Alert, AlertSeverity, AlertStatus, CreateNotificationChannelDto, NotificationChannel,
+    Alert, AlertSeverity, AlertStatus, ChannelType, CreateNotificationChannelDto, NotificationChannel,
     UpdateNotificationChannelDto,
 };
 use common::ApiResponse;
@@ -11,6 +11,7 @@ use uuid::Uuid;
 use validator::Validate;
 
 use crate::{
+    alerting::validate_webhook_url,
     auth::{middleware::CurrentUser, rbac::require_admin},
     error::AppError,
     state::AppState,
@@ -58,6 +59,17 @@ pub async fn create_channel(
 ) -> Result<Json<ApiResponse<NotificationChannel>>, AppError> {
     require_admin(&user)?;
     payload.validate().map_err(|e| AppError::ValidationError(e.to_string()))?;
+
+    // SSRF Protection: Validate webhook / slack endpoints
+    if payload.r#type == ChannelType::Webhook {
+        if let Some(url) = payload.config_json.get("endpoint_url").and_then(|v| v.as_str()) {
+            validate_webhook_url(url, true).await?;
+        }
+    } else if payload.r#type == ChannelType::Slack {
+        if let Some(url) = payload.config_json.get("webhook_url").and_then(|v| v.as_str()) {
+            validate_webhook_url(url, true).await?;
+        }
+    }
 
     let is_enabled = payload.is_enabled.unwrap_or(true);
     let channel = sqlx::query_as::<_, NotificationChannel>(
@@ -122,6 +134,17 @@ pub async fn update_channel(
     let config_json = payload.config_json.unwrap_or(current.config_json);
     let min_severity = payload.min_severity.unwrap_or(current.min_severity);
     let is_enabled = payload.is_enabled.unwrap_or(current.is_enabled);
+
+    // SSRF Protection: Validate webhook / slack endpoints
+    if channel_type == ChannelType::Webhook {
+        if let Some(url) = config_json.get("endpoint_url").and_then(|v| v.as_str()) {
+            validate_webhook_url(url, true).await?;
+        }
+    } else if channel_type == ChannelType::Slack {
+        if let Some(url) = config_json.get("webhook_url").and_then(|v| v.as_str()) {
+            validate_webhook_url(url, true).await?;
+        }
+    }
 
     let updated = sqlx::query_as::<_, NotificationChannel>(
         r#"

@@ -3,6 +3,7 @@ pub mod auth;
 pub mod error;
 pub mod handlers;
 pub mod middleware;
+pub mod redis_client;
 pub mod routes;
 pub mod state;
 

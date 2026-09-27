@@ -15,5 +15,6 @@ pub struct AppState {
     pub rate_limiter: Arc<DashMap<String, (Instant, usize)>>,
     pub failed_logins: Arc<DashMap<String, (u32, Instant)>>,
     pub alert_dispatcher: Arc<crate::alerting::AlertDispatcher>,
+    pub redis: Option<Arc<crate::redis_client::SimpleRedisClient>>,
 }
 

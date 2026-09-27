@@ -19,16 +19,24 @@ pub struct AlertDispatcher {
 
 impl AlertDispatcher {
     pub fn new(pool: PgPool, deduplication_seconds: u64) -> Self {
+        Self::with_redis(pool, deduplication_seconds, None)
+    }
+
+    pub fn with_redis(
+        pool: PgPool,
+        deduplication_seconds: u64,
+        redis: Option<Arc<crate::redis_client::SimpleRedisClient>>,
+    ) -> Self {
         Self {
             pool,
-            throttler: Arc::new(AlertThrottler::new(deduplication_seconds)),
+            throttler: Arc::new(AlertThrottler::with_redis(deduplication_seconds, redis)),
         }
     }
 
     /// Dispatch alert to all matching, enabled notification channels concurrently
     pub async fn dispatch(&self, alert: &Alert) -> Result<(), AppError> {
-        // 1. Throttling / Deduplication check
-        if self.throttler.should_throttle(alert.rule_id, alert.src_ip) {
+        // 1. Throttling / Deduplication check (distributed via Redis if active)
+        if self.throttler.should_throttle_async(alert.rule_id, alert.src_ip).await {
             info!(
                 "Suppressed duplicate alert for rule {:?} from source IP {}",
                 alert.rule_id, alert.src_ip

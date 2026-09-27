@@ -37,7 +37,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (alert_broadcast_tx, _) = broadcast::channel::<Alert>(1000);
     let (traffic_broadcast_tx, _) = broadcast::channel::<TrafficEvent>(5000);
 
-    let alert_dispatcher = Arc::new(backend::alerting::AlertDispatcher::new(pool.clone(), 60));
+    let redis_url = std::env::var("REDIS_URL").ok();
+    let redis_client = redis_url.map(|addr| {
+        info!("Initializing distributed Redis cluster integration with {}", addr);
+        Arc::new(backend::redis_client::SimpleRedisClient::new(Some(addr)))
+    });
+
+    let alert_dispatcher = Arc::new(backend::alerting::AlertDispatcher::with_redis(
+        pool.clone(),
+        60,
+        redis_client.clone(),
+    ));
 
     if jwt_secret.starts_with("super_secret") {
         tracing::warn!("⚠️ SECURITY WARNING: Using default insecure JWT_SECRET! Please set JWT_SECRET in production.");
@@ -52,6 +62,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         rate_limiter: Arc::new(DashMap::new()),
         failed_logins: Arc::new(DashMap::new()),
         alert_dispatcher,
+        redis: redis_client,
     };
 
 

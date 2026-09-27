@@ -101,4 +101,24 @@ impl DetectionRule for ArpSpoofDetector {
 
         None
     }
+
+    fn export_state(&self) -> Option<serde_json::Value> {
+        let map: HashMap<String, String> = self
+            .ip_to_mac
+            .iter()
+            .map(|(ip, mac)| (ip.to_string(), mac.clone()))
+            .collect();
+        serde_json::to_value(map).ok()
+    }
+
+    fn import_state(&mut self, state: &serde_json::Value) {
+        if let Some(map) = state.as_object() {
+            for (ip_str, mac_val) in map {
+                if let (Ok(ip), Some(mac)) = (ip_str.parse::<IpNetwork>(), mac_val.as_str()) {
+                    self.ip_to_mac.insert(ip, mac.to_string());
+                }
+            }
+        }
+    }
 }
+

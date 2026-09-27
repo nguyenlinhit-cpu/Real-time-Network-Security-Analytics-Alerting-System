@@ -13,10 +13,18 @@ pub struct ZScoreAnomalyDetector {
     window_size: usize,
     history: VecDeque<f64>,
     last_alert_time: Option<Instant>,
+    // EWMA adaptive baseline parameters
+    ewma_alpha: f64,
+    ewma_mean: Option<f64>,
+    ewma_variance: Option<f64>,
 }
 
 impl ZScoreAnomalyDetector {
     pub fn new(z_threshold: f64, window_size: usize) -> Self {
+        Self::with_ewma(z_threshold, window_size, 0.05)
+    }
+
+    pub fn with_ewma(z_threshold: f64, window_size: usize, ewma_alpha: f64) -> Self {
         Self {
             rule_id: None,
             is_enabled: true,
@@ -24,21 +32,52 @@ impl ZScoreAnomalyDetector {
             window_size,
             history: VecDeque::with_capacity(window_size),
             last_alert_time: None,
+            ewma_alpha: ewma_alpha.clamp(0.01, 0.5),
+            ewma_mean: None,
+            ewma_variance: None,
         }
     }
 
-    fn calculate_z_score(&self, value: f64) -> Option<f64> {
+    /// Calculates Z-Score using EWMA adaptive baseline and sliding-window statistics
+    fn calculate_z_score(&mut self, value: f64) -> Option<f64> {
+        // 1. Update EWMA adaptive baseline
+        match (self.ewma_mean, self.ewma_variance) {
+            (None, _) => {
+                self.ewma_mean = Some(value);
+                self.ewma_variance = Some(100.0);
+            }
+            (Some(mean), Some(var)) => {
+                let diff = value - mean;
+                let new_mean = mean + self.ewma_alpha * diff;
+                let new_var = (1.0 - self.ewma_alpha) * (var + self.ewma_alpha * diff * diff);
+                self.ewma_mean = Some(new_mean);
+                self.ewma_variance = Some(new_var);
+            }
+            _ => {}
+        }
+
         if self.history.len() < 10 {
             return None; // Not enough baseline samples yet
         }
 
+        // Combine sliding window mean with EWMA to detect high-frequency sudden spikes
         let mean = self.history.iter().sum::<f64>() / self.history.len() as f64;
         let variance = self.history.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / self.history.len() as f64;
         let std_dev = variance.sqrt().max(1.0);
 
-        Some((value - mean) / std_dev)
+        let ewma_z = if let (Some(m), Some(v)) = (self.ewma_mean, self.ewma_variance) {
+            let s = v.sqrt().max(1.0);
+            (value - m) / s
+        } else {
+            0.0
+        };
+
+        let window_z = (value - mean) / std_dev;
+        // Take the conservative score (or max) to accurately identify spikes
+        Some(window_z.max(ewma_z))
     }
 }
+
 
 impl DetectionRule for ZScoreAnomalyDetector {
     fn name(&self) -> &str {
@@ -110,4 +149,31 @@ impl DetectionRule for ZScoreAnomalyDetector {
 
         None
     }
+
+    fn export_state(&self) -> Option<serde_json::Value> {
+        let history_vec: Vec<f64> = self.history.iter().copied().collect();
+        Some(serde_json::json!({
+            "history": history_vec,
+            "ewma_mean": self.ewma_mean,
+            "ewma_variance": self.ewma_variance,
+        }))
+    }
+
+    fn import_state(&mut self, state: &serde_json::Value) {
+        if let Some(arr) = state.get("history").and_then(|v| v.as_array()) {
+            self.history.clear();
+            for item in arr {
+                if let Some(val) = item.as_f64() {
+                    self.history.push_back(val);
+                }
+            }
+        }
+        if let Some(m) = state.get("ewma_mean").and_then(|v| v.as_f64()) {
+            self.ewma_mean = Some(m);
+        }
+        if let Some(v) = state.get("ewma_variance").and_then(|v| v.as_f64()) {
+            self.ewma_variance = Some(v);
+        }
+    }
 }
+
