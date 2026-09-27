@@ -61,6 +61,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    let engine = Arc::new(tokio::sync::Mutex::new(engine));
+
+    // Periodic state snapshotting background task (persists ARP cache, sliding windows every 30s)
+    let engine_snapshot = engine.clone();
+    let state_file_periodic = state_file.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(30));
+        interval.tick().await; // skip immediate first tick
+        loop {
+            interval.tick().await;
+            let eng = engine_snapshot.lock().await;
+            if let Err(e) = eng.save_state_to_file(&state_file_periodic) {
+                warn!("Periodic rule state snapshot failed: {}", e);
+            } else {
+                tracing::debug!("Periodic rule state snapshot saved to {}", state_file_periodic);
+            }
+        }
+    });
+
     if simulation_mode {
         info!("Running in SIMULATION MODE on interface '{}'", interface_name);
         info!("Demo Attack Scenario can be triggered automatically.");
@@ -68,8 +87,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut sim = TrafficSimulator::new(interface_name.clone());
 
         // Select attack scenario based on environment variable (or run demonstration cycle)
-        let scenario_type = std::env::var("DEMO_SCENARIO").unwrap_or_else(|_| "all".to_string());
+        let _scenario_type = std::env::var("DEMO_SCENARIO").unwrap_or_else(|_| "all".to_string());
 
+        let engine_sim = engine.clone();
         tokio::spawn(async move {
             let mut packet_count: u64 = 0;
             let mut scenario_idx = 0;
@@ -108,7 +128,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 if let Some(event) = sim.next_event().await {
                     packet_count += 1;
-                    engine.process_event(&event).await;
+                    engine_sim.lock().await.process_event(&event).await;
 
                     if packet_count % 100 == 0 {
                         info!("Processed {} simulated packets successfully", packet_count);
@@ -122,9 +142,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!("Running in LIVE CAPTURE mode on interface '{}'", interface_name);
         match LiveCapture::new(&interface_name) {
             Ok(mut live) => {
-                while let Some(event) = live.next_event().await {
-                    engine.process_event(&event).await;
-                }
+                let engine_live = engine.clone();
+                tokio::spawn(async move {
+                    while let Some(event) = live.next_event().await {
+                        engine_live.lock().await.process_event(&event).await;
+                    }
+                });
             }
             Err(e) => {
                 warn!("Could not start live capture on interface '{}': {}. Switching to simulation.", interface_name, e);
@@ -135,7 +158,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Keep the main process running
     tokio::signal::ctrl_c().await?;
     info!("Shutting down detection engine gracefully.");
-    if let Err(e) = engine.save_state_to_file(&state_file) {
+    if let Err(e) = engine.lock().await.save_state_to_file(&state_file) {
         warn!("Could not save rules state to {}: {}", state_file, e);
     }
     Ok(())

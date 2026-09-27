@@ -50,6 +50,7 @@ services:
       REDIS_URL: redis://redis:6379
       SERVER_HOST: 0.0.0.0
       SERVER_PORT: 8080
+      ENVIRONMENT: ${ENVIRONMENT:-development}
       JWT_SECRET: ${JWT_SECRET:-super_secret_jwt_key_at_least_32_bytes_long_12345}
       CORS_ALLOWED_ORIGIN: ${CORS_ALLOWED_ORIGIN:-http://localhost:3000,https://localhost}
       RUST_LOG: ${RUST_LOG:-info,backend=debug}
@@ -57,6 +58,12 @@ services:
       - "8080:8080"
     networks:
       - secnet_mesh
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/health || curl -f http://localhost:8080/health || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
 
   frontend:
     build:
@@ -65,25 +72,36 @@ services:
     container_name: secnet_frontend
     restart: unless-stopped
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
     ports:
       - "3000:80"
     networks:
       - secnet_mesh
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:80/ || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 3s
 
   nginx-proxy:
     image: nginx:alpine
     container_name: secnet_nginx_tls
     restart: unless-stopped
     depends_on:
-      - backend
-      - frontend
+      backend:
+        condition: service_healthy
+      frontend:
+        condition: service_healthy
     ports:
       - "80:80"
       - "443:443"
     volumes:
       - ./deploy/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./deploy/nginx/certs:/etc/nginx/certs:ro
+      - ./deploy/nginx/certs:/etc/nginx/certs
+      - ./deploy/nginx/entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
     networks:
       - secnet_mesh
 
@@ -97,13 +115,16 @@ services:
       timescaledb:
         condition: service_healthy
       backend:
-        condition: service_started
+        condition: service_healthy
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@timescaledb:5432/${POSTGRES_DB:-network_security}
       SIMULATION_MODE: "true"
       SIMULATION_PACKETS_PER_SEC: 500
       CAPTURE_INTERFACE: "eth0"
+      RULES_STATE_FILE: "/data/secnet_rules_state.json"
       RUST_LOG: "info,capture_engine=debug"
+    volumes:
+      - capture_data:/data
     networks:
       - secnet_mesh
 
@@ -113,4 +134,6 @@ networks:
 
 volumes:
   timescale_data:
+    driver: local
+  capture_data:
     driver: local

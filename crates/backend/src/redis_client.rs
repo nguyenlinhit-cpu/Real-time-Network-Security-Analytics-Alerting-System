@@ -1,9 +1,9 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info};
 
 /// Lightweight, async RESP-compatible Redis client for distributed rate limiting and alert deduplication
 pub struct SimpleRedisClient {
@@ -160,4 +160,125 @@ impl SimpleRedisClient {
             Ok(false)
         }
     }
+
+    /// Checks if a key exists in Redis
+    pub async fn exists(&self, key: &str) -> Result<bool, String> {
+        let mut guard = self.connection.lock().await;
+        let reader = match self.get_connection(&mut guard).await {
+            Ok(r) => r,
+            Err(e) => return Err(e),
+        };
+
+        let cmd = format!("*2\r\n$6\r\nEXISTS\r\n${}\r\n{}\r\n", key.len(), key);
+        if let Err(e) = reader.get_mut().write_all(cmd.as_bytes()).await {
+            *guard = None;
+            return Err(format!("Write EXISTS error to Redis: {}", e));
+        }
+
+        let mut line = String::new();
+        if let Err(e) = reader.read_line(&mut line).await {
+            *guard = None;
+            return Err(format!("Read EXISTS error from Redis: {}", e));
+        }
+
+        let trimmed = line.trim();
+        if trimmed.starts_with(':') {
+            let val: i64 = trimmed[1..].parse().unwrap_or(0);
+            Ok(val > 0)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Sets key with TTL
+    pub async fn set_ex(&self, key: &str, val: &str, ttl_seconds: u64) -> Result<(), String> {
+        let mut guard = self.connection.lock().await;
+        let reader = match self.get_connection(&mut guard).await {
+            Ok(r) => r,
+            Err(e) => return Err(e),
+        };
+
+        let ttl_str = ttl_seconds.to_string();
+        let cmd = format!(
+            "*5\r\n$3\r\nSET\r\n${}\r\n{}\r\n${}\r\n{}\r\n$2\r\nEX\r\n${}\r\n{}\r\n",
+            key.len(),
+            key,
+            val.len(),
+            val,
+            ttl_str.len(),
+            ttl_str
+        );
+
+        if let Err(e) = reader.get_mut().write_all(cmd.as_bytes()).await {
+            *guard = None;
+            return Err(format!("Write SET EX error to Redis: {}", e));
+        }
+
+        let mut line = String::new();
+        let _ = reader.read_line(&mut line).await;
+        Ok(())
+    }
+
+    /// Deletes a key from Redis
+    pub async fn del(&self, key: &str) -> Result<bool, String> {
+        let mut guard = self.connection.lock().await;
+        let reader = match self.get_connection(&mut guard).await {
+            Ok(r) => r,
+            Err(e) => return Err(e),
+        };
+
+        let cmd = format!("*2\r\n$3\r\nDEL\r\n${}\r\n{}\r\n", key.len(), key);
+        if let Err(e) = reader.get_mut().write_all(cmd.as_bytes()).await {
+            *guard = None;
+            return Err(format!("Write DEL error to Redis: {}", e));
+        }
+
+        let mut line = String::new();
+        if let Err(e) = reader.read_line(&mut line).await {
+            *guard = None;
+            return Err(format!("Read DEL error from Redis: {}", e));
+        }
+
+        let trimmed = line.trim();
+        if trimmed.starts_with(':') {
+            let val: i64 = trimmed[1..].parse().unwrap_or(0);
+            Ok(val > 0)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Gets integer value of key (e.g. for failed login counter)
+    pub async fn get_int(&self, key: &str) -> Result<Option<i64>, String> {
+        let mut guard = self.connection.lock().await;
+        let reader = match self.get_connection(&mut guard).await {
+            Ok(r) => r,
+            Err(e) => return Err(e),
+        };
+
+        let cmd = format!("*2\r\n$3\r\nGET\r\n${}\r\n{}\r\n", key.len(), key);
+        if let Err(e) = reader.get_mut().write_all(cmd.as_bytes()).await {
+            *guard = None;
+            return Err(format!("Write GET error to Redis: {}", e));
+        }
+
+        let mut line = String::new();
+        if let Err(e) = reader.read_line(&mut line).await {
+            *guard = None;
+            return Err(format!("Read GET error from Redis: {}", e));
+        }
+
+        let trimmed = line.trim();
+        if trimmed == "$-1" {
+            Ok(None)
+        } else if trimmed.starts_with('$') {
+            let mut val_line = String::new();
+            let _ = reader.read_line(&mut val_line).await;
+            let num = val_line.trim().parse::<i64>().ok();
+            Ok(num)
+        } else {
+            Ok(None)
+        }
+    }
 }
+

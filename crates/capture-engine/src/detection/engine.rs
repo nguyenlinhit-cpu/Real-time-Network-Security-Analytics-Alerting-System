@@ -185,15 +185,15 @@ pub fn spawn_alert_persister(mut alert_rx: Receiver<Alert>, pool: Option<Arc<PgP
                 // 2. Insert into database blocked_ips table
                 if let Some(ref pool) = pool {
                     let block_reason = format!("Auto-blocked by SecNet IPS due to Critical Alert: {}", alert.title);
-                    let block_res = sqlx::query!(
+                    let block_res = sqlx::query(
                         r#"
                         INSERT INTO blocked_ips (ip_address, reason, blocked_until)
                         VALUES ($1, $2, CURRENT_TIMESTAMP + INTERVAL '2 hours')
                         ON CONFLICT (ip_address) DO UPDATE SET blocked_until = CURRENT_TIMESTAMP + INTERVAL '2 hours'
                         "#,
-                        alert.src_ip,
-                        block_reason
                     )
+                    .bind(alert.src_ip)
+                    .bind(block_reason)
                     .execute(pool.as_ref())
                     .await;
 

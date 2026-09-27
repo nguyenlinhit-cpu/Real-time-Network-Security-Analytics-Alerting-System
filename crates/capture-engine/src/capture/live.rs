@@ -18,7 +18,7 @@ use uuid::Uuid;
 use super::PacketSource;
 
 pub struct LiveCapture {
-    interface_name: String,
+    pub interface_name: String,
     receiver: Mutex<Receiver<TrafficEvent>>,
 }
 
@@ -72,19 +72,27 @@ impl LiveCapture {
 
     fn parse_ethernet_frame(packet: &[u8], iface: &str) -> Option<TrafficEvent> {
         let eth = EthernetPacket::new(packet)?;
+        let eth_payload = eth.payload();
 
         let (src_ip, dst_ip, next_protocol, l4_payload) = match eth.get_ethertype() {
             EtherTypes::Ipv4 => {
-                let ip = Ipv4Packet::new(eth.payload())?;
+                let ip = Ipv4Packet::new(eth_payload)?;
                 let src = IpNetwork::new(std::net::IpAddr::V4(ip.get_source()), 32).ok()?;
                 let dst = IpNetwork::new(std::net::IpAddr::V4(ip.get_destination()), 32).ok()?;
-                (src, dst, ip.get_next_level_protocol(), ip.payload())
+                let header_len = (ip.get_header_length() as usize) * 4;
+                if eth_payload.len() < header_len {
+                    return None;
+                }
+                (src, dst, ip.get_next_level_protocol(), &eth_payload[header_len..])
             }
             EtherTypes::Ipv6 => {
-                let ip = Ipv6Packet::new(eth.payload())?;
+                let ip = Ipv6Packet::new(eth_payload)?;
                 let src = IpNetwork::new(std::net::IpAddr::V6(ip.get_source()), 128).ok()?;
                 let dst = IpNetwork::new(std::net::IpAddr::V6(ip.get_destination()), 128).ok()?;
-                (src, dst, ip.get_next_header(), ip.payload())
+                if eth_payload.len() < 40 {
+                    return None;
+                }
+                (src, dst, ip.get_next_header(), &eth_payload[40..])
             }
             _ => return None,
         };

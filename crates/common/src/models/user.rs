@@ -83,10 +83,19 @@ impl From<User> for UserPublicDto {
     }
 }
 
+fn default_token_type() -> String {
+    "access".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserClaims {
     pub sub: Uuid,
     pub username: String,
     pub role: UserRole,
     pub exp: usize,
+    #[serde(default = "default_token_type")]
+    pub token_type: String,
+    #[serde(default)]
+    pub jti: Option<Uuid>,
 }
+

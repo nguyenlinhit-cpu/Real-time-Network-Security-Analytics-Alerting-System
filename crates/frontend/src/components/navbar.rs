@@ -13,7 +13,9 @@ pub fn Navbar(
 ) -> impl IntoView {
 
     let on_logout = move |_| {
-        ApiClient::logout();
+        leptos::task::spawn_local(async move {
+            ApiClient::api_logout().await;
+        });
         set_current_user.set(None);
         set_active_tab.set("login".to_string());
     };

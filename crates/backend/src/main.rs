@@ -49,8 +49,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         redis_client.clone(),
     ));
 
-    if jwt_secret.starts_with("super_secret") {
-        tracing::warn!("⚠️ SECURITY WARNING: Using default insecure JWT_SECRET! Please set JWT_SECRET in production.");
+    let env = std::env::var("ENVIRONMENT")
+        .or_else(|_| std::env::var("APP_ENV"))
+        .unwrap_or_else(|_| "development".to_string());
+    let is_prod = env.eq_ignore_ascii_case("production") || env.eq_ignore_ascii_case("prod");
+
+    if is_prod {
+        if jwt_secret.starts_with("super_secret") || jwt_secret.len() < 32 {
+            tracing::error!("🚨 FATAL SECURITY ERROR: Server refused to start in production with missing, default, or weak JWT_SECRET! (must be >= 32 characters and not default)");
+            panic!("Production requires a strong, unique JWT_SECRET with at least 32 characters!");
+        }
+    } else if jwt_secret.starts_with("super_secret") {
+        tracing::warn!("⚠️ SECURITY WARNING: Using default insecure JWT_SECRET! Please set a unique JWT_SECRET in production.");
     }
 
     let state = AppState {
@@ -63,6 +73,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         failed_logins: Arc::new(DashMap::new()),
         alert_dispatcher,
         redis: redis_client,
+        revoked_tokens: Arc::new(DashMap::new()),
     };
 
 

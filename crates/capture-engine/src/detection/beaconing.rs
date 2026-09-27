@@ -41,7 +41,7 @@ impl BeaconingDetector {
         let mut intervals = Vec::with_capacity(timestamps.len() - 1);
         for i in 1..timestamps.len() {
             let dt = timestamps[i].duration_since(timestamps[i - 1]).as_secs_f64();
-            if dt > 0.05 {
+            if dt >= 0.01 {
                 intervals.push(dt);
             }
         }
@@ -53,8 +53,8 @@ impl BeaconingDetector {
         let count = intervals.len() as f64;
         let mean_interval: f64 = intervals.iter().sum::<f64>() / count;
 
-        // C2 beaconing typically has intervals between 0.5s and 300s
-        if mean_interval < 0.2 || mean_interval > 600.0 {
+        // C2 beaconing typically has intervals between 0.05s and 600s
+        if mean_interval < 0.05 || mean_interval > 600.0 {
             return None;
         }
 
@@ -108,15 +108,19 @@ impl DetectionRule for BeaconingDetector {
         let key = (event.src_ip, event.dst_ip);
         let now = Instant::now();
 
-        let timestamps = self.history.entry(key).or_default();
+        {
+            let timestamps = self.history.entry(key).or_default();
 
-        // Keep maximum 20 recent connections for analysis
-        if timestamps.len() >= 20 {
-            timestamps.pop_front();
+            // Keep maximum 20 recent connections for analysis
+            if timestamps.len() >= 20 {
+                timestamps.pop_front();
+            }
+            timestamps.push_back(now);
         }
-        timestamps.push_back(now);
 
-        if let Some((interval, cv)) = self.check_beaconing(timestamps) {
+        let beacon_analysis = self.history.get(&key).and_then(|ts| self.check_beaconing(ts));
+
+        if let Some((interval, cv)) = beacon_analysis {
             if let Some(last_alert) = self.last_alert_time.get(&key) {
                 if now.duration_since(*last_alert) < Duration::from_secs(60) {
                     return None;

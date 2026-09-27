@@ -1,5 +1,6 @@
 use common::models::{User, UserClaims};
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
+use uuid::Uuid;
 
 use crate::error::AppError;
 
@@ -17,6 +18,8 @@ pub fn generate_tokens(
         username: user.username.clone(),
         role: user.role,
         exp: access_exp,
+        token_type: "access".to_string(),
+        jti: Some(Uuid::new_v4()),
     };
 
     let refresh_claims = UserClaims {
@@ -24,7 +27,10 @@ pub fn generate_tokens(
         username: user.username.clone(),
         role: user.role,
         exp: refresh_exp,
+        token_type: "refresh".to_string(),
+        jti: Some(Uuid::new_v4()),
     };
+
 
     let token = encode(
         &Header::default(),

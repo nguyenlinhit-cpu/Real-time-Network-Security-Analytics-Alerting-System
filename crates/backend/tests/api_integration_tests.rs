@@ -43,6 +43,8 @@ fn test_rbac_permission_enforcement() {
         username: "admin_user".to_string(),
         role: UserRole::Admin,
         exp: 9999999999,
+        token_type: "access".to_string(),
+        jti: Some(Uuid::new_v4()),
     });
 
     let analyst_user = CurrentUser(UserClaims {
@@ -50,6 +52,8 @@ fn test_rbac_permission_enforcement() {
         username: "analyst_user".to_string(),
         role: UserRole::Analyst,
         exp: 9999999999,
+        token_type: "access".to_string(),
+        jti: Some(Uuid::new_v4()),
     });
 
     let viewer_user = CurrentUser(UserClaims {
@@ -57,6 +61,8 @@ fn test_rbac_permission_enforcement() {
         username: "viewer_user".to_string(),
         role: UserRole::Viewer,
         exp: 9999999999,
+        token_type: "access".to_string(),
+        jti: Some(Uuid::new_v4()),
     });
 
     // Admin should have access to both admin-only and analyst endpoints
@@ -70,4 +76,29 @@ fn test_rbac_permission_enforcement() {
     // Viewer should be denied from both
     assert!(require_analyst_or_admin(&viewer_user).is_err(), "Viewer must be denied for analyst actions");
     assert!(require_admin(&viewer_user).is_err(), "Viewer must be denied for admin actions");
+}
+
+#[test]
+fn test_token_type_segregation() {
+    let secret = "test_super_secret_jwt_key_at_least_32_bytes_long";
+    let user = User {
+        id: Uuid::new_v4(),
+        username: "test_analyst".to_string(),
+        email: "analyst@test.local".to_string(),
+        password_hash: "hash".to_string(),
+        role: UserRole::Analyst,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    };
+
+    let (token, refresh_token) = generate_tokens(&user, secret, 24).expect("Token generation should succeed");
+    
+    let access_claims = verify_token(&token, secret).expect("Access token verification should succeed");
+    assert_eq!(access_claims.token_type, "access");
+    assert!(access_claims.jti.is_some());
+
+    let refresh_claims = verify_token(&refresh_token, secret).expect("Refresh token verification should succeed");
+    assert_eq!(refresh_claims.token_type, "refresh");
+    assert!(refresh_claims.jti.is_some());
+    assert_ne!(access_claims.jti, refresh_claims.jti);
 }

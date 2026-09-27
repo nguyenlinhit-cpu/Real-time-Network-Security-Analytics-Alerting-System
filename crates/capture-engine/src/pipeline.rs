@@ -1,12 +1,11 @@
 use common::models::TrafficEvent;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::Mutex;
-use tracing::{error, info, warn};
+use tracing::info;
 
 /// Decoupled event sink interface for capture-to-detection pipelines
 pub trait EventSink: Send + Sync {

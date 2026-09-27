@@ -21,6 +21,7 @@ use crate::{
         auth::register,
         auth::login,
         auth::refresh_token,
+        auth::logout,
         dashboard::get_dashboard_summary,
         traffic::get_traffic,
         alerts::get_alerts,
@@ -105,6 +106,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/notifications/channels", get(notifications::get_channels).post(notifications::create_channel))
         .route("/api/notifications/channels/:id", patch(notifications::update_channel).delete(notifications::delete_channel))
         .route("/api/notifications/test/:id", post(notifications::test_channel))
+        .route("/api/auth/logout", post(auth::logout))
         .layer(middleware::from_fn_with_state(state.clone(), auth_middleware));
 
     // 3. WebSocket routes (real-time push)
@@ -114,7 +116,9 @@ pub fn create_router(state: AppState) -> Router {
 
     // 4. System & Observability routes
     let system_routes = Router::new()
-        .route("/metrics", get(metrics::metrics_handler));
+        .route("/metrics", get(metrics::metrics_handler))
+        .route("/health", get(|| async { axum::Json(serde_json::json!({"status": "ok", "service": "secnet-backend"})) }))
+        .route("/api/health", get(|| async { axum::Json(serde_json::json!({"status": "ok", "service": "secnet-backend"})) }));
 
     // 5. Configurable CORS whitelist
     let cors = if let Ok(origins_str) = std::env::var("CORS_ALLOWED_ORIGINS") {

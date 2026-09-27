@@ -1,3 +1,7 @@
 /target
 .env
 *.env
+deploy/nginx/certs/
+*.key
+*.crt
+secnet_rules_state.json

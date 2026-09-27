@@ -47,7 +47,7 @@ async fn test_multi_channel_alert_simulation() {
     // 2. Webhook Channel Test
     let webhook_ch = WebhookChannel::new(
         "SIEM Webhook".to_string(),
-        "http://127.0.0.1:9999/api/v1/alerts".to_string(),
+        "https://93.184.216.34:9999/api/v1/alerts".to_string(),
     );
     assert_eq!(webhook_ch.name(), "SIEM Webhook");
     let webhook_res = webhook_ch.send(&alert).await;

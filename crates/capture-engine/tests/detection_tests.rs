@@ -7,7 +7,7 @@ use capture_engine::detection::zscore_anomaly::ZScoreAnomalyDetector;
 use capture_engine::detection::DetectionRule;
 use chrono::Utc;
 use common::models::{AlertSeverity, TrafficEvent};
-use ipnetwork::IpNetwork;
+use tokio::sync::mpsc;
 use uuid::Uuid;
 
 fn make_event(src: &str, dst: &str, src_port: i32, dst_port: i32, protocol: &str, flags: &str, bytes: i64) -> TrafficEvent {
@@ -148,10 +148,13 @@ fn test_beaconing_detector_triggers_on_periodic_callbacks() {
     use capture_engine::detection::beaconing::BeaconingDetector;
     let mut detector = BeaconingDetector::new(5, 0.20);
 
-    // Simulate 6 periodic SYN packets
+    // Simulate periodic SYN packets until detection
     let mut alert = None;
     for _ in 0..6 {
-        alert = detector.evaluate(&make_event("192.168.1.80/32", "45.33.32.156/32", 49152, 443, "TCP", "SYN", 64));
+        if let Some(a) = detector.evaluate(&make_event("192.168.1.80/32", "45.33.32.156/32", 49152, 443, "TCP", "SYN", 64)) {
+            alert = Some(a);
+            break;
+        }
         std::thread::sleep(std::time::Duration::from_millis(60));
     }
 

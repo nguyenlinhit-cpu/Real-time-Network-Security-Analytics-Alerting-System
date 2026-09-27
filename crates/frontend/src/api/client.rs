@@ -45,6 +45,11 @@ impl ApiClient {
         }
     }
 
+    pub async fn api_logout() {
+        let _ = Self::auth_request("POST", "/api/auth/logout").send().await;
+        Self::logout();
+    }
+
     pub fn is_authenticated() -> bool {
         Self::get_token().is_some()
     }
