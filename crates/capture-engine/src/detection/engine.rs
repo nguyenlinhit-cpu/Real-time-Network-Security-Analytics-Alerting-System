@@ -59,12 +59,14 @@ impl DetectionEngine {
         }
     }
 
-    /// Save state to file
+    /// Save state to file atomically using temporary file
     pub fn save_state_to_file(&self, path: &str) -> Result<(), std::io::Error> {
         let json = self.snapshot_state();
         let content = serde_json::to_string_pretty(&json)?;
-        std::fs::write(path, content)?;
-        info!("Saved rule state snapshot to {}", path);
+        let tmp_path = format!("{}.tmp", path);
+        std::fs::write(&tmp_path, content)?;
+        std::fs::rename(&tmp_path, path)?;
+        info!("Saved rule state snapshot atomically to {}", path);
         Ok(())
     }
 

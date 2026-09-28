@@ -3,7 +3,7 @@ use common::models::{
     Alert, AlertSeverity, AlertStatus, DetectionRule as RuleModel, RuleType, TrafficEvent,
 };
 use ipnetwork::IpNetwork;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
@@ -16,7 +16,7 @@ pub struct BruteForceDetector {
     window_duration: Duration,
     sensitive_ports: Vec<i32>,
     // (src_ip, dst_ip, port) -> timestamps of attempts
-    attempt_history: HashMap<(IpNetwork, IpNetwork, i32), Vec<Instant>>,
+    attempt_history: HashMap<(IpNetwork, IpNetwork, i32), VecDeque<Instant>>,
     last_alert_time: HashMap<(IpNetwork, IpNetwork, i32), Instant>,
 }
 
@@ -31,6 +31,22 @@ impl BruteForceDetector {
             attempt_history: HashMap::new(),
             last_alert_time: HashMap::new(),
         }
+    }
+
+    /// Periodic memory cleanup for stale attempt histories (Mục 30)
+    pub fn cleanup_stale(&mut self, max_age: Duration) {
+        let now = Instant::now();
+        self.attempt_history.retain(|_, history| {
+            while let Some(front) = history.front() {
+                if now.duration_since(*front) > max_age {
+                    history.pop_front();
+                } else {
+                    break;
+                }
+            }
+            !history.is_empty()
+        });
+        self.last_alert_time.retain(|_, t| now.duration_since(*t) < max_age);
     }
 }
 

@@ -205,7 +205,9 @@ impl LiveCapture {
             IpNextHeaderProtocols::Icmpv6 => {
                 protocol = "ICMPv6".to_string();
             }
-            _ => {}
+        // Ignore internal infrastructure traffic to avoid feedback loops (DB: 5432, Redis: 6379) (Mục C1.4)
+        if src_port == 5432 || dst_port == 5432 || src_port == 6379 || dst_port == 6379 {
+            return None;
         }
 
         Some(TrafficEvent {

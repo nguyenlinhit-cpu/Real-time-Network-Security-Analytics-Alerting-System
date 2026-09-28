@@ -81,7 +81,7 @@ impl DetectionRule for ArpSpoofDetector {
 
                 self.last_alert_time.insert(target_ip, now);
                 let old_mac = existing_mac.clone();
-                self.ip_to_mac.insert(target_ip, mac.clone());
+                // Preserve trusted MAC to prevent flapping when legitimate host responds (Mục 29)
 
                 return Some(Alert {
                     id: Uuid::new_v4(),

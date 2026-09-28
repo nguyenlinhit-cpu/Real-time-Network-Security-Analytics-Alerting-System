@@ -3,7 +3,7 @@ use common::models::{
     Alert, AlertSeverity, AlertStatus, DetectionRule as RuleModel, RuleType, TrafficEvent,
 };
 use ipnetwork::IpNetwork;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
@@ -15,7 +15,7 @@ pub struct SynFloodDetector {
     threshold_packets: usize,
     window_duration: Duration,
     // dst_ip -> timestamps of SYN packets
-    syn_history: HashMap<IpNetwork, Vec<Instant>>,
+    syn_history: HashMap<IpNetwork, VecDeque<Instant>>,
     last_alert_time: HashMap<IpNetwork, Instant>,
 }
 
@@ -29,6 +29,22 @@ impl SynFloodDetector {
             syn_history: HashMap::new(),
             last_alert_time: HashMap::new(),
         }
+    }
+
+    /// Periodic memory cleanup for stale target IP histories (Mục 30)
+    pub fn cleanup_stale(&mut self, max_age: Duration) {
+        let now = Instant::now();
+        self.syn_history.retain(|_, history| {
+            while let Some(front) = history.front() {
+                if now.duration_since(*front) > max_age {
+                    history.pop_front();
+                } else {
+                    break;
+                }
+            }
+            !history.is_empty()
+        });
+        self.last_alert_time.retain(|_, t| now.duration_since(*t) < max_age);
     }
 }
 
@@ -72,9 +88,16 @@ impl DetectionRule for SynFloodDetector {
         let now = Instant::now();
         let target = event.dst_ip;
 
+        // O(1) amortized sliding window eviction via VecDeque (Mục 31)
         let history = self.syn_history.entry(target).or_default();
-        history.retain(|t| now.duration_since(*t) <= self.window_duration);
-        history.push(now);
+        while let Some(front) = history.front() {
+            if now.duration_since(*front) > self.window_duration {
+                history.pop_front();
+            } else {
+                break;
+            }
+        }
+        history.push_back(now);
 
         if history.len() >= self.threshold_packets {
             if let Some(last_alert) = self.last_alert_time.get(&target) {

@@ -3,7 +3,7 @@ use common::models::{
     Alert, AlertSeverity, AlertStatus, DetectionRule as RuleModel, RuleType, TrafficEvent,
 };
 use ipnetwork::IpNetwork;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
@@ -15,7 +15,7 @@ pub struct PortScanDetector {
     threshold_ports: usize,
     window_duration: Duration,
     // (src_ip, dst_ip) -> list of (timestamp, dst_port)
-    connection_history: HashMap<(IpNetwork, IpNetwork), Vec<(Instant, u16)>>,
+    connection_history: HashMap<(IpNetwork, IpNetwork), VecDeque<(Instant, u16)>>,
     last_alert_time: HashMap<(IpNetwork, IpNetwork), Instant>,
 }
 
@@ -29,6 +29,22 @@ impl PortScanDetector {
             connection_history: HashMap::new(),
             last_alert_time: HashMap::new(),
         }
+    }
+
+    /// Periodic memory cleanup for stale IP pair histories (Mục 30)
+    pub fn cleanup_stale(&mut self, max_age: Duration) {
+        let now = Instant::now();
+        self.connection_history.retain(|_, history| {
+            while let Some((t, _)) = history.front() {
+                if now.duration_since(*t) > max_age {
+                    history.pop_front();
+                } else {
+                    break;
+                }
+            }
+            !history.is_empty()
+        });
+        self.last_alert_time.retain(|_, t| now.duration_since(*t) < max_age);
     }
 }
 
@@ -61,13 +77,24 @@ impl DetectionRule for PortScanDetector {
             return None;
         }
 
+        // For TCP, only consider connection initiations (SYN without ACK), avoiding server responses on ephemeral ports (Mục 25)
+        if event.protocol == "TCP" && (!event.flags.contains("SYN") || event.flags.contains("ACK")) {
+            return None;
+        }
+
         let now = Instant::now();
         let key = (event.src_ip, event.dst_ip);
         let dst_port = event.dst_port as u16;
 
         let history = self.connection_history.entry(key).or_default();
-        history.retain(|(t, _)| now.duration_since(*t) <= self.window_duration);
-        history.push((now, dst_port));
+        while let Some((t, _)) = history.front() {
+            if now.duration_since(*t) > self.window_duration {
+                history.pop_front();
+            } else {
+                break;
+            }
+        }
+        history.push_back((now, dst_port));
 
         let distinct_ports: HashSet<u16> = history.iter().map(|(_, p)| *p).collect();
 
