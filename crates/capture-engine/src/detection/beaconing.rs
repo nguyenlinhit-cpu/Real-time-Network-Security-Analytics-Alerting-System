@@ -155,6 +155,8 @@ impl DetectionRule for BeaconingDetector {
                 status: AlertStatus::Open,
                 acknowledged_by: None,
                 resolved_at: None,
+                mitre_tactic: Some("Command and Control".to_string()),
+                mitre_technique: Some("T1071".to_string()),
             });
         }
 

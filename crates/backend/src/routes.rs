@@ -102,6 +102,12 @@ pub fn create_router(state: AppState) -> Router {
             "/api/alerts/:id",
             get(alerts::get_alert_by_id).patch(alerts::update_alert_status),
         )
+        .route(
+            "/api/alerts/:id/traffic",
+            get(alerts::get_alert_traffic),
+        )
+        .route("/api/audit-logs", get(audit_logs::get_audit_logs))
+        .route("/api/sensor/status", get(sensor::get_sensor_status))
         .route("/api/rules", get(rules::get_rules).post(rules::create_rule))
         .route(
             "/api/rules/:id",
