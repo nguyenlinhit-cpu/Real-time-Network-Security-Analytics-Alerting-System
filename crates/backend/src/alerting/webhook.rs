@@ -57,7 +57,18 @@ pub fn is_private_or_restricted_ip(ip: IpAddr) -> bool {
 }
 
 /// Validates webhook target URL to protect against Server-Side Request Forgery (SSRF)
-pub async fn validate_webhook_url(url_str: &str, require_https: bool) -> Result<reqwest::Url, AppError> {
+pub async fn validate_webhook_url(
+    url_str: &str,
+    require_https: bool,
+) -> Result<reqwest::Url, AppError> {
+    validate_webhook_url_ext(url_str, require_https, false).await
+}
+
+pub async fn validate_webhook_url_ext(
+    url_str: &str,
+    require_https: bool,
+    allow_private: bool,
+) -> Result<reqwest::Url, AppError> {
     let parsed = reqwest::Url::parse(url_str)
         .map_err(|e| AppError::BadRequest(format!("Invalid webhook URL format: {}", e)))?;
 
@@ -80,52 +91,60 @@ pub async fn validate_webhook_url(url_str: &str, require_https: bool) -> Result<
         .host_str()
         .ok_or_else(|| AppError::BadRequest("Webhook URL must contain a valid host".to_string()))?;
 
-    // Block localhost literal strings and internal suffixes
-    let lower_host = host_str.to_lowercase();
-    if lower_host == "localhost"
-        || lower_host.ends_with(".localhost")
-        || lower_host.ends_with(".local")
-        || lower_host.ends_with(".internal")
-    {
-        return Err(AppError::BadRequest(format!(
-            "SSRF Protection: Access to internal host '{}' is blocked",
-            host_str
-        )));
-    }
-
-    // Direct IP parsing check
-    if let Ok(ip) = host_str.parse::<IpAddr>() {
-        if is_private_or_restricted_ip(ip) {
+    if !allow_private {
+        // Block localhost literal strings and internal suffixes
+        let lower_host = host_str.to_lowercase();
+        if lower_host == "localhost"
+            || lower_host.ends_with(".localhost")
+            || lower_host.ends_with(".local")
+            || lower_host.ends_with(".internal")
+        {
             return Err(AppError::BadRequest(format!(
-                "SSRF Protection: Access to private or restricted IP '{}' is blocked",
-                ip
-            )));
-        }
-    } else {
-        // DNS Resolution check
-        let port = parsed.port_or_known_default().unwrap_or(if scheme == "https" { 443 } else { 80 });
-        let host_port = format!("{}:{}", host_str, port);
-
-        let addrs = tokio::net::lookup_host(&host_port).await
-            .map_err(|e| AppError::BadRequest(format!("Failed to resolve webhook domain '{}': {}", host_str, e)))?;
-
-        let mut found = false;
-        for addr in addrs {
-            found = true;
-            let ip = addr.ip();
-            if is_private_or_restricted_ip(ip) {
-                return Err(AppError::BadRequest(format!(
-                    "SSRF Protection: Domain '{}' resolved to private or restricted IP '{}'",
-                    host_str, ip
-                )));
-            }
-        }
-
-        if !found {
-            return Err(AppError::BadRequest(format!(
-                "SSRF Protection: No valid DNS resolution for host '{}'",
+                "SSRF Protection: Access to internal host '{}' is blocked",
                 host_str
             )));
+        }
+
+        // Direct IP parsing check
+        if let Ok(ip) = host_str.parse::<IpAddr>() {
+            if is_private_or_restricted_ip(ip) {
+                return Err(AppError::BadRequest(format!(
+                    "SSRF Protection: Access to private or restricted IP '{}' is blocked",
+                    ip
+                )));
+            }
+        } else {
+            // DNS Resolution check
+            let port = parsed
+                .port_or_known_default()
+                .unwrap_or(if scheme == "https" { 443 } else { 80 });
+            let host_port = format!("{}:{}", host_str, port);
+
+            let addrs = tokio::net::lookup_host(&host_port).await.map_err(|e| {
+                AppError::BadRequest(format!(
+                    "Failed to resolve webhook domain '{}': {}",
+                    host_str, e
+                ))
+            })?;
+
+            let mut found = false;
+            for addr in addrs {
+                found = true;
+                let ip = addr.ip();
+                if is_private_or_restricted_ip(ip) {
+                    return Err(AppError::BadRequest(format!(
+                        "SSRF Protection: Domain '{}' resolved to private or restricted IP '{}'",
+                        host_str, ip
+                    )));
+                }
+            }
+
+            if !found {
+                return Err(AppError::BadRequest(format!(
+                    "SSRF Protection: No valid DNS resolution for host '{}'",
+                    host_str
+                )));
+            }
         }
     }
 
@@ -137,6 +156,7 @@ pub struct WebhookChannel {
     pub endpoint_url: String,
     pub client: Client,
     pub require_https: bool,
+    pub allow_private_ips: bool,
 }
 
 impl WebhookChannel {
@@ -145,6 +165,15 @@ impl WebhookChannel {
     }
 
     pub fn with_options(name: String, endpoint_url: String, require_https: bool) -> Self {
+        Self::with_full_options(name, endpoint_url, require_https, false)
+    }
+
+    pub fn with_full_options(
+        name: String,
+        endpoint_url: String,
+        require_https: bool,
+        allow_private_ips: bool,
+    ) -> Self {
         Self {
             name,
             endpoint_url,
@@ -154,6 +183,7 @@ impl WebhookChannel {
                 .build()
                 .unwrap_or_default(),
             require_https,
+            allow_private_ips,
         }
     }
 }
@@ -167,15 +197,30 @@ impl NotificationChannel for WebhookChannel {
         ChannelType::Webhook
     }
 
-    fn send<'a>(&'a self, alert: &'a Alert) -> Pin<Box<dyn Future<Output = Result<(), AppError>> + Send + 'a>> {
+    fn send<'a>(
+        &'a self,
+        alert: &'a Alert,
+    ) -> Pin<Box<dyn Future<Output = Result<(), AppError>> + Send + 'a>> {
         Box::pin(async move {
             // Validate URL against SSRF before firing request
-            if let Err(e) = validate_webhook_url(&self.endpoint_url, self.require_https).await {
-                error!("🚨 [SSRF BLOCKED] Webhook delivery aborted for {}: {}", self.endpoint_url, e);
+            if let Err(e) = validate_webhook_url_ext(
+                &self.endpoint_url,
+                self.require_https,
+                self.allow_private_ips,
+            )
+            .await
+            {
+                error!(
+                    "🚨 [SSRF BLOCKED] Webhook delivery aborted for {}: {}",
+                    self.endpoint_url, e
+                );
                 return Err(e);
             }
 
-            info!("🔗 [WEBHOOK ALERT] Posting incident to {}: {}", self.endpoint_url, alert.title);
+            info!(
+                "🔗 [WEBHOOK ALERT] Posting incident to {}: {}",
+                self.endpoint_url, alert.title
+            );
 
             let response = self
                 .client
@@ -190,15 +235,21 @@ impl NotificationChannel for WebhookChannel {
                     Ok(())
                 }
                 Ok(res) => {
-                    warn!("Webhook responded with non-2xx status code: {}", res.status());
-                    Ok(())
+                    let status = res.status();
+                    let body = res.text().await.unwrap_or_default();
+                    let msg = format!(
+                        "Webhook responded with non-2xx status code {}: {}",
+                        status, body
+                    );
+                    warn!("{}", msg);
+                    Err(AppError::Internal(msg))
                 }
                 Err(e) => {
-                    warn!("Webhook delivery failed: {}", e);
-                    Ok(())
+                    let msg = format!("Webhook delivery failed: {}", e);
+                    warn!("{}", msg);
+                    Err(AppError::Internal(msg))
                 }
             }
         })
     }
 }
-

@@ -6,7 +6,7 @@ use axum::{
 use chrono::{DateTime, Utc};
 use common::models::Alert;
 
-use crate::{error::AppError, state::AppState};
+use crate::{auth::middleware::CurrentUser, error::AppError, state::AppState};
 
 #[derive(serde::Deserialize)]
 pub struct ReportExportQuery {
@@ -15,8 +15,26 @@ pub struct ReportExportQuery {
     pub format: Option<String>,
 }
 
+/// Sanitize text against CSV / Formula Injection (CWE-1236) (Mục 20)
+fn sanitize_csv_cell(val: &str) -> String {
+    let escaped = val.replace('\"', "\"\"");
+    let trimmed = escaped.trim_start();
+    if trimmed.starts_with('=')
+        || trimmed.starts_with('+')
+        || trimmed.starts_with('-')
+        || trimmed.starts_with('@')
+        || trimmed.starts_with('\t')
+        || trimmed.starts_with('\r')
+    {
+        format!("'{}", escaped)
+    } else {
+        escaped
+    }
+}
+
 pub async fn export_reports(
     State(state): State<AppState>,
+    _user: CurrentUser,
     Query(query): Query<ReportExportQuery>,
 ) -> Result<impl IntoResponse, AppError> {
     let alerts = sqlx::query_as::<_, Alert>(
@@ -29,14 +47,15 @@ pub async fn export_reports(
           AND ($2::TIMESTAMPTZ IS NULL OR detected_at <= $2)
         ORDER BY detected_at DESC
         LIMIT 1000
-        "#
+        "#,
     )
     .bind(query.from)
     .bind(query.to)
     .fetch_all(&state.pool)
     .await?;
 
-    let mut csv_output = String::from("id,detected_at,severity,status,src_ip,dst_ip,title,description\n");
+    let mut csv_output =
+        String::from("id,detected_at,severity,status,src_ip,dst_ip,title,description\n");
     for a in alerts {
         csv_output.push_str(&format!(
             "\"{}\",\"{}\",\"{:?}\",\"{:?}\",\"{}\",\"{}\",\"{}\",\"{}\"\n",
@@ -46,8 +65,8 @@ pub async fn export_reports(
             a.status,
             a.src_ip,
             a.dst_ip,
-            a.title.replace('\"', "\"\""),
-            a.description.replace('\"', "\"\"")
+            sanitize_csv_cell(&a.title),
+            sanitize_csv_cell(&a.description)
         ));
     }
 

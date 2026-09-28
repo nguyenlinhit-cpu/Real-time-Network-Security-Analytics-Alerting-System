@@ -32,7 +32,7 @@ pub async fn get_rules(
             threshold_value, time_window_seconds, created_at, updated_at
         FROM detection_rules
         ORDER BY created_at ASC
-        "#
+        "#,
     )
     .fetch_all(&state.pool)
     .await?;
@@ -64,7 +64,7 @@ pub async fn get_rule_by_id(
             threshold_value, time_window_seconds, created_at, updated_at
         FROM detection_rules
         WHERE id = $1
-        "#
+        "#,
     )
     .bind(id)
     .fetch_optional(&state.pool)
@@ -91,7 +91,9 @@ pub async fn create_rule(
     Json(payload): Json<CreateRuleDto>,
 ) -> Result<Json<ApiResponse<DetectionRule>>, AppError> {
     require_admin(&current_user)?;
-    payload.validate().map_err(|e| AppError::ValidationError(e.to_string()))?;
+    payload
+        .validate()
+        .map_err(|e| AppError::ValidationError(e.to_string()))?;
 
     let is_enabled = payload.is_enabled.unwrap_or(true);
 
@@ -172,7 +174,7 @@ pub async fn update_rule(
         RETURNING 
             id, name, rule_type, condition_json, severity, is_enabled,
             threshold_value, time_window_seconds, created_at, updated_at
-        "#
+        "#,
     )
     .bind(payload.name)
     .bind(payload.rule_type)
@@ -235,5 +237,8 @@ pub async fn delete_rule(
     .execute(&state.pool)
     .await;
 
-    Ok(Json(ApiResponse::ok(format!("Rule {} deleted successfully", id))))
+    Ok(Json(ApiResponse::ok(format!(
+        "Rule {} deleted successfully",
+        id
+    ))))
 }

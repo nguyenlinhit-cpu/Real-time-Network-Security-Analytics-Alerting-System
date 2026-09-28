@@ -1,5 +1,7 @@
 use chrono::Utc;
-use common::models::{Alert, AlertSeverity, AlertStatus, DetectionRule as RuleModel, RuleType, TrafficEvent};
+use common::models::{
+    Alert, AlertSeverity, AlertStatus, DetectionRule as RuleModel, RuleType, TrafficEvent,
+};
 use ipnetwork::IpNetwork;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -94,7 +96,10 @@ impl DetectionRule for BruteForceDetector {
                 id: Uuid::new_v4(),
                 rule_id: self.rule_id,
                 severity: AlertSeverity::High,
-                title: format!("Brute-Force Authentication Attempt on Port {}", event.dst_port),
+                title: format!(
+                    "Brute-Force Authentication Attempt on Port {}",
+                    event.dst_port
+                ),
                 description: format!(
                     "Source {} generated {} rapid connection attempts to target {}:{} within {:?}",
                     event.src_ip,

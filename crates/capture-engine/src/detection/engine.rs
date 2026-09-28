@@ -91,8 +91,10 @@ impl DetectionEngine {
         for db_rule in db_rules {
             for rule in &mut self.rules {
                 let matches = rule.name() == db_rule.name
-                    || (rule.name() == "Brute-force Attack Detection" && db_rule.name == "SSH/RDP Brute-Force Detection")
-                    || (rule.name() == "ARP Spoofing / Poisoning Detection" && db_rule.name == "ARP Spoofing Detection");
+                    || (rule.name() == "Brute-force Attack Detection"
+                        && db_rule.name == "SSH/RDP Brute-Force Detection")
+                    || (rule.name() == "ARP Spoofing / Poisoning Detection"
+                        && db_rule.name == "ARP Spoofing Detection");
                 if matches {
                     rule.update_config(&db_rule);
                     info!("Updated configuration for rule: {}", rule.name());
@@ -107,7 +109,10 @@ impl DetectionEngine {
     pub async fn process_event(&mut self, event: &TrafficEvent) {
         for rule in &mut self.rules {
             if let Some(alert) = rule.evaluate(event) {
-                info!("🚨 [ALERT TRIGGERED] {} - {}", alert.title, alert.description);
+                info!(
+                    "🚨 [ALERT TRIGGERED] {} - {}",
+                    alert.title, alert.description
+                );
                 if let Err(e) = self.alert_tx.send(alert).await {
                     error!("Failed to forward alert to alerting channel: {}", e);
                 }
@@ -120,7 +125,10 @@ impl DetectionEngine {
         for event in events {
             for rule in &mut self.rules {
                 if let Some(alert) = rule.evaluate(event) {
-                    info!("🚨 [ALERT TRIGGERED] {} - {}", alert.title, alert.description);
+                    info!(
+                        "🚨 [ALERT TRIGGERED] {} - {}",
+                        alert.title, alert.description
+                    );
                     if let Err(e) = self.alert_tx.send(alert).await {
                         error!("Failed to forward alert to alerting channel: {}", e);
                     }
@@ -153,11 +161,21 @@ pub fn is_allowlisted_ip(ip: &IpNetwork) -> bool {
 /// Helper to trigger active OS firewall blocking (iptables / nftables)
 pub async fn apply_os_firewall_block(ip: IpNetwork) {
     let ip_str = ip.ip().to_string();
-    info!("🛡️ [AUTO-RESPONSE FIREWALL] Auto-blocking malicious IP {} via OS firewall", ip_str);
+    info!(
+        "🛡️ [AUTO-RESPONSE FIREWALL] Auto-blocking malicious IP {} via OS firewall",
+        ip_str
+    );
 
     // 1. Try nftables
     let nft_result = tokio::process::Command::new("nft")
-        .args(["add", "element", "inet", "filter", "secnet_blocklist", &format!("{{ {} }}", ip_str)])
+        .args([
+            "add",
+            "element",
+            "inet",
+            "filter",
+            "secnet_blocklist",
+            &format!("{{ {} }}", ip_str),
+        ])
         .output()
         .await;
 
@@ -182,10 +200,17 @@ pub async fn apply_os_firewall_block(ip: IpNetwork) {
         }
         Ok(out) => {
             let err = String::from_utf8_lossy(&out.stderr);
-            warn!("⚠️ Firewall command failed (status: {}): {}. Running without CAP_NET_ADMIN/root?", out.status, err.trim());
+            warn!(
+                "⚠️ Firewall command failed (status: {}): {}. Running without CAP_NET_ADMIN/root?",
+                out.status,
+                err.trim()
+            );
         }
         Err(e) => {
-            warn!("⚠️ Firewall command execution failed: {}. Continuing with database blocklist.", e);
+            warn!(
+                "⚠️ Firewall command execution failed: {}. Continuing with database blocklist.",
+                e
+            );
         }
     }
 }
@@ -201,7 +226,10 @@ pub fn spawn_alert_persister(mut alert_rx: Receiver<Alert>, pool: Option<Arc<PgP
             // Auto-Response: If alert is Critical, auto-block attacker IP (if not in allowlist) (Mục 17)
             if auto_block_enabled && alert.severity == AlertSeverity::Critical {
                 if is_allowlisted_ip(&alert.src_ip) {
-                    info!("🛡️ [AUTO-RESPONSE] IP {} is in allowlist, skipping automated block.", alert.src_ip);
+                    info!(
+                        "🛡️ [AUTO-RESPONSE] IP {} is in allowlist, skipping automated block.",
+                        alert.src_ip
+                    );
                 } else {
                     info!("🚨 [AUTO-RESPONSE] Critical threat identified! Initiating automated response for IP {}", alert.src_ip);
 
@@ -210,7 +238,10 @@ pub fn spawn_alert_persister(mut alert_rx: Receiver<Alert>, pool: Option<Arc<PgP
 
                     // 2. Insert into database blocked_ips table
                     if let Some(ref pool) = pool {
-                        let block_reason = format!("Auto-blocked by SecNet IPS due to Critical Alert: {}", alert.title);
+                        let block_reason = format!(
+                            "Auto-blocked by SecNet IPS due to Critical Alert: {}",
+                            alert.title
+                        );
                         let block_res = sqlx::query(
                             r#"
                             INSERT INTO blocked_ips (ip_address, reason, blocked_until)
@@ -226,7 +257,10 @@ pub fn spawn_alert_persister(mut alert_rx: Receiver<Alert>, pool: Option<Arc<PgP
                         if let Err(e) = block_res {
                             warn!("Failed to auto-insert IP into blocked_ips table: {}", e);
                         } else {
-                            info!("🔒 Malicious IP {} registered in blocked_ips table (2h lockout)", alert.src_ip);
+                            info!(
+                                "🔒 Malicious IP {} registered in blocked_ips table (2h lockout)",
+                                alert.src_ip
+                            );
                         }
                     }
                 }
@@ -265,4 +299,3 @@ pub fn spawn_alert_persister(mut alert_rx: Receiver<Alert>, pool: Option<Arc<PgP
         }
     });
 }
-

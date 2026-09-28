@@ -29,11 +29,9 @@ pub async fn get_dashboard_summary(
     .await?;
 
     // 2. Total active/unresolved alerts count
-    let alert_stats = sqlx::query!(
-        "SELECT COUNT(*)::BIGINT as total_alerts FROM alerts"
-    )
-    .fetch_one(&state.pool)
-    .await?;
+    let alert_stats = sqlx::query!("SELECT COUNT(*)::BIGINT as total_alerts FROM alerts")
+        .fetch_one(&state.pool)
+        .await?;
 
     // 3. Top talkers (Source IPs by packet count)
     let top_ips = sqlx::query!(

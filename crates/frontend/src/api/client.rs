@@ -4,6 +4,7 @@ use gloo_net::http::{Request, RequestBuilder};
 use web_sys::window;
 
 const TOKEN_STORAGE_KEY: &str = "secnet_jwt_token";
+const REFRESH_TOKEN_STORAGE_KEY: &str = "secnet_refresh_token";
 const USER_STORAGE_KEY: &str = "secnet_user_info";
 
 pub struct ApiClient;
@@ -24,6 +25,20 @@ impl ApiClient {
         }
     }
 
+    pub fn get_refresh_token() -> Option<String> {
+        window()?
+            .local_storage()
+            .ok()??
+            .get_item(REFRESH_TOKEN_STORAGE_KEY)
+            .ok()?
+    }
+
+    pub fn set_refresh_token(token: &str) {
+        if let Some(storage) = window().and_then(|w| w.local_storage().ok().flatten()) {
+            let _ = storage.set_item(REFRESH_TOKEN_STORAGE_KEY, token);
+        }
+    }
+
     pub fn get_current_user() -> Option<UserPublicDto> {
         let storage = window().and_then(|w| w.local_storage().ok().flatten())?;
         let user_str = storage.get_item(USER_STORAGE_KEY).ok()??;
@@ -41,13 +56,46 @@ impl ApiClient {
     pub fn logout() {
         if let Some(storage) = window().and_then(|w| w.local_storage().ok().flatten()) {
             let _ = storage.remove_item(TOKEN_STORAGE_KEY);
+            let _ = storage.remove_item(REFRESH_TOKEN_STORAGE_KEY);
             let _ = storage.remove_item(USER_STORAGE_KEY);
         }
     }
 
     pub async fn api_logout() {
-        let _ = Self::auth_request("POST", "/api/auth/logout").send().await;
+        let refresh_opt = Self::get_refresh_token();
+        let payload = serde_json::json!({
+            "refresh_token": refresh_opt.unwrap_or_default()
+        });
+        let _ = Self::auth_request("POST", "/api/auth/logout")
+            .json(&payload)
+            .map(|r| r.send());
         Self::logout();
+    }
+
+    pub async fn try_refresh_token() -> Result<String, String> {
+        let refresh =
+            Self::get_refresh_token().ok_or_else(|| "No refresh token available".to_string())?;
+        let payload = serde_json::json!({
+            "refresh_token": refresh
+        });
+        let res = Request::post("/api/auth/refresh")
+            .json(&payload)
+            .map_err(|e| e.to_string())?
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let body: ApiResponse<AuthResponseDto> = res.json().await.map_err(|e| e.to_string())?;
+        if body.success {
+            if let Some(data) = body.data {
+                Self::set_token(&data.token);
+                Self::set_refresh_token(&data.refresh_token);
+                Self::set_current_user(&data.user);
+                return Ok(data.token);
+            }
+        }
+        Self::logout();
+        Err("Session expired, please login again".to_string())
     }
 
     pub fn is_authenticated() -> bool {
@@ -69,7 +117,6 @@ impl ApiClient {
         req
     }
 
-
     pub async fn login(dto: &LoginDto) -> Result<AuthResponseDto, String> {
         let res = Request::post("/api/auth/login")
             .json(dto)
@@ -82,6 +129,7 @@ impl ApiClient {
         if body.success {
             if let Some(data) = body.data {
                 Self::set_token(&data.token);
+                Self::set_refresh_token(&data.refresh_token);
                 Self::set_current_user(&data.user);
                 return Ok(data);
             }
@@ -95,7 +143,10 @@ impl ApiClient {
             .await
             .map_err(|e| e.to_string())?;
         let body: ApiResponse<TrafficSummaryDto> = res.json().await.map_err(|e| e.to_string())?;
-        body.data.ok_or_else(|| body.error.unwrap_or_else(|| "Failed to load summary".to_string()))
+        body.data.ok_or_else(|| {
+            body.error
+                .unwrap_or_else(|| "Failed to load summary".to_string())
+        })
     }
 
     pub async fn get_alerts() -> Result<Vec<Alert>, String> {
@@ -104,7 +155,10 @@ impl ApiClient {
             .await
             .map_err(|e| e.to_string())?;
         let body: ApiResponse<Vec<Alert>> = res.json().await.map_err(|e| e.to_string())?;
-        body.data.ok_or_else(|| body.error.unwrap_or_else(|| "Failed to load alerts".to_string()))
+        body.data.ok_or_else(|| {
+            body.error
+                .unwrap_or_else(|| "Failed to load alerts".to_string())
+        })
     }
 
     pub async fn update_alert_status(id: uuid::Uuid, status: AlertStatus) -> Result<Alert, String> {
@@ -116,7 +170,10 @@ impl ApiClient {
             .await
             .map_err(|e| e.to_string())?;
         let body: ApiResponse<Alert> = res.json().await.map_err(|e| e.to_string())?;
-        body.data.ok_or_else(|| body.error.unwrap_or_else(|| "Failed to update alert".to_string()))
+        body.data.ok_or_else(|| {
+            body.error
+                .unwrap_or_else(|| "Failed to update alert".to_string())
+        })
     }
 
     pub async fn get_traffic() -> Result<Vec<TrafficEvent>, String> {
@@ -125,7 +182,10 @@ impl ApiClient {
             .await
             .map_err(|e| e.to_string())?;
         let body: ApiResponse<Vec<TrafficEvent>> = res.json().await.map_err(|e| e.to_string())?;
-        body.data.ok_or_else(|| body.error.unwrap_or_else(|| "Failed to load traffic".to_string()))
+        body.data.ok_or_else(|| {
+            body.error
+                .unwrap_or_else(|| "Failed to load traffic".to_string())
+        })
     }
 
     pub async fn get_rules() -> Result<Vec<DetectionRule>, String> {
@@ -134,7 +194,10 @@ impl ApiClient {
             .await
             .map_err(|e| e.to_string())?;
         let body: ApiResponse<Vec<DetectionRule>> = res.json().await.map_err(|e| e.to_string())?;
-        body.data.ok_or_else(|| body.error.unwrap_or_else(|| "Failed to load rules".to_string()))
+        body.data.ok_or_else(|| {
+            body.error
+                .unwrap_or_else(|| "Failed to load rules".to_string())
+        })
     }
 
     pub async fn get_devices() -> Result<Vec<Device>, String> {
@@ -143,7 +206,10 @@ impl ApiClient {
             .await
             .map_err(|e| e.to_string())?;
         let body: ApiResponse<Vec<Device>> = res.json().await.map_err(|e| e.to_string())?;
-        body.data.ok_or_else(|| body.error.unwrap_or_else(|| "Failed to load devices".to_string()))
+        body.data.ok_or_else(|| {
+            body.error
+                .unwrap_or_else(|| "Failed to load devices".to_string())
+        })
     }
 
     pub async fn get_device_history(id: uuid::Uuid) -> Result<Vec<TrafficEvent>, String> {
@@ -152,9 +218,11 @@ impl ApiClient {
             .await
             .map_err(|e| e.to_string())?;
         let body: ApiResponse<Vec<TrafficEvent>> = res.json().await.map_err(|e| e.to_string())?;
-        body.data.ok_or_else(|| body.error.unwrap_or_else(|| "Failed to load device history".to_string()))
+        body.data.ok_or_else(|| {
+            body.error
+                .unwrap_or_else(|| "Failed to load device history".to_string())
+        })
     }
-
 
     pub async fn register(dto: &CreateUserDto) -> Result<AuthResponseDto, String> {
         let res = Request::post("/api/auth/register")
@@ -168,11 +236,14 @@ impl ApiClient {
         if body.success {
             if let Some(data) = body.data {
                 Self::set_token(&data.token);
+                Self::set_refresh_token(&data.refresh_token);
                 Self::set_current_user(&data.user);
                 return Ok(data);
             }
         }
-        Err(body.error.unwrap_or_else(|| "Registration failed".to_string()))
+        Err(body
+            .error
+            .unwrap_or_else(|| "Registration failed".to_string()))
     }
 
     pub async fn create_rule(dto: &CreateRuleDto) -> Result<DetectionRule, String> {
@@ -183,7 +254,10 @@ impl ApiClient {
             .await
             .map_err(|e| e.to_string())?;
         let body: ApiResponse<DetectionRule> = res.json().await.map_err(|e| e.to_string())?;
-        body.data.ok_or_else(|| body.error.unwrap_or_else(|| "Failed to create rule".to_string()))
+        body.data.ok_or_else(|| {
+            body.error
+                .unwrap_or_else(|| "Failed to create rule".to_string())
+        })
     }
 
     pub async fn update_rule(id: uuid::Uuid, dto: &UpdateRuleDto) -> Result<DetectionRule, String> {
@@ -194,7 +268,10 @@ impl ApiClient {
             .await
             .map_err(|e| e.to_string())?;
         let body: ApiResponse<DetectionRule> = res.json().await.map_err(|e| e.to_string())?;
-        body.data.ok_or_else(|| body.error.unwrap_or_else(|| "Failed to update rule".to_string()))
+        body.data.ok_or_else(|| {
+            body.error
+                .unwrap_or_else(|| "Failed to update rule".to_string())
+        })
     }
 
     pub async fn delete_rule(id: uuid::Uuid) -> Result<(), String> {
@@ -206,7 +283,9 @@ impl ApiClient {
         if body.success {
             Ok(())
         } else {
-            Err(body.error.unwrap_or_else(|| "Failed to delete rule".to_string()))
+            Err(body
+                .error
+                .unwrap_or_else(|| "Failed to delete rule".to_string()))
         }
     }
 
@@ -216,7 +295,10 @@ impl ApiClient {
             .await
             .map_err(|e| e.to_string())?;
         let body: ApiResponse<Vec<BlockedIp>> = res.json().await.map_err(|e| e.to_string())?;
-        body.data.ok_or_else(|| body.error.unwrap_or_else(|| "Failed to load blocklist".to_string()))
+        body.data.ok_or_else(|| {
+            body.error
+                .unwrap_or_else(|| "Failed to load blocklist".to_string())
+        })
     }
 
     pub async fn add_to_blocklist(dto: &CreateBlockedIpDto) -> Result<BlockedIp, String> {
@@ -227,7 +309,10 @@ impl ApiClient {
             .await
             .map_err(|e| e.to_string())?;
         let body: ApiResponse<BlockedIp> = res.json().await.map_err(|e| e.to_string())?;
-        body.data.ok_or_else(|| body.error.unwrap_or_else(|| "Failed to block IP".to_string()))
+        body.data.ok_or_else(|| {
+            body.error
+                .unwrap_or_else(|| "Failed to block IP".to_string())
+        })
     }
 
     pub async fn remove_from_blocklist(id: uuid::Uuid) -> Result<(), String> {
@@ -239,7 +324,9 @@ impl ApiClient {
         if body.success {
             Ok(())
         } else {
-            Err(body.error.unwrap_or_else(|| "Failed to remove IP from blocklist".to_string()))
+            Err(body
+                .error
+                .unwrap_or_else(|| "Failed to remove IP from blocklist".to_string()))
         }
     }
 
@@ -248,11 +335,17 @@ impl ApiClient {
             .send()
             .await
             .map_err(|e| e.to_string())?;
-        let body: ApiResponse<Vec<NotificationChannel>> = res.json().await.map_err(|e| e.to_string())?;
-        body.data.ok_or_else(|| body.error.unwrap_or_else(|| "Failed to load channels".to_string()))
+        let body: ApiResponse<Vec<NotificationChannel>> =
+            res.json().await.map_err(|e| e.to_string())?;
+        body.data.ok_or_else(|| {
+            body.error
+                .unwrap_or_else(|| "Failed to load channels".to_string())
+        })
     }
 
-    pub async fn create_notification_channel(dto: &CreateNotificationChannelDto) -> Result<NotificationChannel, String> {
+    pub async fn create_notification_channel(
+        dto: &CreateNotificationChannelDto,
+    ) -> Result<NotificationChannel, String> {
         let res = Self::auth_request("POST", "/api/notifications/channels")
             .json(dto)
             .map_err(|e| e.to_string())?
@@ -260,10 +353,16 @@ impl ApiClient {
             .await
             .map_err(|e| e.to_string())?;
         let body: ApiResponse<NotificationChannel> = res.json().await.map_err(|e| e.to_string())?;
-        body.data.ok_or_else(|| body.error.unwrap_or_else(|| "Failed to create channel".to_string()))
+        body.data.ok_or_else(|| {
+            body.error
+                .unwrap_or_else(|| "Failed to create channel".to_string())
+        })
     }
 
-    pub async fn update_notification_channel(id: uuid::Uuid, dto: &UpdateNotificationChannelDto) -> Result<NotificationChannel, String> {
+    pub async fn update_notification_channel(
+        id: uuid::Uuid,
+        dto: &UpdateNotificationChannelDto,
+    ) -> Result<NotificationChannel, String> {
         let res = Self::auth_request("PATCH", &format!("/api/notifications/channels/{}", id))
             .json(dto)
             .map_err(|e| e.to_string())?
@@ -271,7 +370,10 @@ impl ApiClient {
             .await
             .map_err(|e| e.to_string())?;
         let body: ApiResponse<NotificationChannel> = res.json().await.map_err(|e| e.to_string())?;
-        body.data.ok_or_else(|| body.error.unwrap_or_else(|| "Failed to update channel".to_string()))
+        body.data.ok_or_else(|| {
+            body.error
+                .unwrap_or_else(|| "Failed to update channel".to_string())
+        })
     }
 
     pub async fn delete_notification_channel(id: uuid::Uuid) -> Result<(), String> {
@@ -283,7 +385,9 @@ impl ApiClient {
         if body.success {
             Ok(())
         } else {
-            Err(body.error.unwrap_or_else(|| "Failed to delete channel".to_string()))
+            Err(body
+                .error
+                .unwrap_or_else(|| "Failed to delete channel".to_string()))
         }
     }
 
@@ -293,7 +397,10 @@ impl ApiClient {
             .await
             .map_err(|e| e.to_string())?;
         let body: ApiResponse<String> = res.json().await.map_err(|e| e.to_string())?;
-        body.data.ok_or_else(|| body.error.unwrap_or_else(|| "Failed to send test alert".to_string()))
+        body.data.ok_or_else(|| {
+            body.error
+                .unwrap_or_else(|| "Failed to send test alert".to_string())
+        })
     }
 
     pub async fn export_csv_file() -> Result<(), String> {
@@ -303,27 +410,40 @@ impl ApiClient {
             .map_err(|e| e.to_string())?;
 
         if !res.ok() {
-            return Err(format!("Export request failed with status: {}", res.status()));
+            return Err(format!(
+                "Export request failed with status: {}",
+                res.status()
+            ));
         }
 
         let csv_text = res.text().await.map_err(|e| e.to_string())?;
 
-        let _ = js_sys::eval(&format!(
-            r#"(function() {{
-                const blob = new Blob([`{}`], {{ type: 'text/csv;charset=utf-8;' }});
-                const url = URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.href = url;
-                a.download = 'security_incidents_report.csv';
-                document.body.appendChild(a);
-                a.click();
-                document.body.removeChild(a);
-                setTimeout(() => URL.revokeObjectURL(url), 1000);
-            }})()"#,
-            csv_text.replace('\\', "\\\\").replace('`', "\\`").replace('$', "\\$")
-        ));
+        // Safe client-side file download via web_sys::Blob without js_sys::eval (Mục 53)
+        let blob_parts = js_sys::Array::new();
+        blob_parts.push(&wasm_bindgen::JsValue::from_str(&csv_text));
+        let blob_props = web_sys::BlobPropertyBag::new();
+        blob_props.set_type("text/csv;charset=utf-8;");
+        if let Ok(blob) = web_sys::Blob::new_with_str_sequence_and_options(&blob_parts, &blob_props)
+        {
+            if let Ok(url) = web_sys::Url::create_object_url_with_blob(&blob) {
+                if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
+                    if let Ok(elem) = doc.create_element("a") {
+                        if let Ok(a) =
+                            wasm_bindgen::JsCast::dyn_into::<web_sys::HtmlAnchorElement>(elem)
+                        {
+                            a.set_href(&url);
+                            a.set_download("security_incidents_report.csv");
+                            if let Some(body) = doc.body() {
+                                let _ = body.append_child(&a);
+                                a.click();
+                                let _ = body.remove_child(&a);
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         Ok(())
     }
 }
-

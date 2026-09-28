@@ -13,7 +13,7 @@ pub fn LoginPage(
     let (username, set_username) = signal(String::new());
     let (email, set_email) = signal(String::new());
     let (password, set_password) = signal(String::new());
-    let (role, set_role) = signal(UserRole::Analyst);
+    let (role, _set_role) = signal(UserRole::Viewer);
     let (error_msg, set_error_msg) = signal::<Option<String>>(None);
     let (is_loading, set_is_loading) = signal(false);
 
@@ -52,7 +52,13 @@ pub fn LoginPage(
                         set_current_user.set(Some(auth_data.user));
                         set_active_tab.set("dashboard".to_string());
                         if let Some(window) = web_sys::window() {
-                            let _ = window.history().and_then(|h| h.replace_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some("/")));
+                            let _ = window.history().and_then(|h| {
+                                h.replace_state_with_url(
+                                    &wasm_bindgen::JsValue::NULL,
+                                    "",
+                                    Some("/"),
+                                )
+                            });
                         }
                     }
                     Err(err) => {
@@ -71,7 +77,13 @@ pub fn LoginPage(
                         set_current_user.set(Some(auth_data.user));
                         set_active_tab.set("dashboard".to_string());
                         if let Some(window) = web_sys::window() {
-                            let _ = window.history().and_then(|h| h.replace_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some("/")));
+                            let _ = window.history().and_then(|h| {
+                                h.replace_state_with_url(
+                                    &wasm_bindgen::JsValue::NULL,
+                                    "",
+                                    Some("/"),
+                                )
+                            });
                         }
                     }
                     Err(err) => {
@@ -142,29 +154,11 @@ pub fn LoginPage(
                                             <input
                                                 type="email"
                                                 required
-                                                placeholder="analyst@secnet.internal"
+                                                placeholder="user@secnet.internal"
                                                 class="w-full bg-ink-950 border border-ink-600 rounded-md px-3.5 py-2 text-xs text-slate-200 placeholder-ink-600 focus:outline-none focus:border-brand/60 transition-colors"
                                                 prop:value=email
                                                 on:input=move |e| set_email.set(event_target_value(&e))
                                             />
-                                        </div>
-                                        <div>
-                                            <label class="block text-[11px] font-mono font-semibold text-ink-500 uppercase tracking-wide mb-1.5">"Role"</label>
-                                            <select
-                                                class="w-full bg-ink-950 border border-ink-600 rounded-md px-3.5 py-2 text-xs text-slate-300 focus:outline-none focus:border-brand/60 transition-colors"
-                                                on:change=move |e| {
-                                                    let val = event_target_value(&e);
-                                                    match val.as_str() {
-                                                        "admin" => set_role.set(UserRole::Admin),
-                                                        "analyst" => set_role.set(UserRole::Analyst),
-                                                        _ => set_role.set(UserRole::Viewer),
-                                                    }
-                                                }
-                                            >
-                                                <option value="analyst">"Analyst — alert resolution, rule view"</option>
-                                                <option value="viewer">"Viewer — read-only operations"</option>
-                                                <option value="admin">"Admin — full configuration"</option>
-                                            </select>
                                         </div>
                                     </div>
                                 }.into_any()

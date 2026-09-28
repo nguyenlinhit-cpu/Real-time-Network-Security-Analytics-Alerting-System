@@ -3,8 +3,8 @@ use axum::{
     Json,
 };
 use common::models::{
-    Alert, AlertSeverity, AlertStatus, ChannelType, CreateNotificationChannelDto, NotificationChannel,
-    UpdateNotificationChannelDto,
+    Alert, AlertSeverity, AlertStatus, ChannelType, CreateNotificationChannelDto,
+    NotificationChannel, UpdateNotificationChannelDto,
 };
 use common::ApiResponse;
 use uuid::Uuid;
@@ -17,6 +17,21 @@ use crate::{
     state::AppState,
 };
 
+fn mask_sensitive_config(config: &mut serde_json::Value) {
+    if let Some(obj) = config.as_object_mut() {
+        for (k, v) in obj.iter_mut() {
+            let lower = k.to_lowercase();
+            if lower.contains("token")
+                || lower.contains("password")
+                || lower.contains("secret")
+                || lower.contains("key")
+            {
+                *v = serde_json::json!("********");
+            }
+        }
+    }
+}
+
 #[utoipa::path(
     get,
     path = "/api/notifications/channels",
@@ -28,8 +43,9 @@ use crate::{
 )]
 pub async fn get_channels(
     State(state): State<AppState>,
+    user: CurrentUser,
 ) -> Result<Json<ApiResponse<Vec<NotificationChannel>>>, AppError> {
-    let channels = sqlx::query_as::<_, NotificationChannel>(
+    let mut channels = sqlx::query_as::<_, NotificationChannel>(
         r#"
         SELECT id, name, type, config_json, min_severity, is_enabled, created_at, updated_at
         FROM notification_channels
@@ -38,6 +54,13 @@ pub async fn get_channels(
     )
     .fetch_all(&state.pool)
     .await?;
+
+    // Mask secrets if not admin (Mục 11)
+    if user.0.role != common::models::UserRole::Admin {
+        for ch in &mut channels {
+            mask_sensitive_config(&mut ch.config_json);
+        }
+    }
 
     Ok(Json(ApiResponse::ok(channels)))
 }
@@ -58,15 +81,25 @@ pub async fn create_channel(
     Json(payload): Json<CreateNotificationChannelDto>,
 ) -> Result<Json<ApiResponse<NotificationChannel>>, AppError> {
     require_admin(&user)?;
-    payload.validate().map_err(|e| AppError::ValidationError(e.to_string()))?;
+    payload
+        .validate()
+        .map_err(|e| AppError::ValidationError(e.to_string()))?;
 
     // SSRF Protection: Validate webhook / slack endpoints
     if payload.r#type == ChannelType::Webhook {
-        if let Some(url) = payload.config_json.get("endpoint_url").and_then(|v| v.as_str()) {
+        if let Some(url) = payload
+            .config_json
+            .get("endpoint_url")
+            .and_then(|v| v.as_str())
+        {
             validate_webhook_url(url, true).await?;
         }
     } else if payload.r#type == ChannelType::Slack {
-        if let Some(url) = payload.config_json.get("webhook_url").and_then(|v| v.as_str()) {
+        if let Some(url) = payload
+            .config_json
+            .get("webhook_url")
+            .and_then(|v| v.as_str())
+        {
             validate_webhook_url(url, true).await?;
         }
     }
@@ -116,7 +149,9 @@ pub async fn update_channel(
     Json(payload): Json<UpdateNotificationChannelDto>,
 ) -> Result<Json<ApiResponse<NotificationChannel>>, AppError> {
     require_admin(&user)?;
-    payload.validate().map_err(|e| AppError::ValidationError(e.to_string()))?;
+    payload
+        .validate()
+        .map_err(|e| AppError::ValidationError(e.to_string()))?;
 
     let current = sqlx::query_as::<_, NotificationChannel>(
         r#"
@@ -233,7 +268,9 @@ pub async fn test_channel(
         rule_id: None,
         severity: AlertSeverity::High,
         title: "Test Alert Dispatch".to_string(),
-        description: "This is an automated test alert triggered from the Security Management Console.".to_string(),
+        description:
+            "This is an automated test alert triggered from the Security Management Console."
+                .to_string(),
         src_ip: "127.0.0.1".parse().unwrap(),
         dst_ip: "10.0.0.1".parse().unwrap(),
         detected_at: chrono::Utc::now(),
@@ -242,7 +279,12 @@ pub async fn test_channel(
         resolved_at: None,
     };
 
-    state.alert_dispatcher.dispatch(&test_alert).await?;
-    Ok(Json(ApiResponse::ok(format!("Dispatched test alert successfully for channel {}", id))))
+    state
+        .alert_dispatcher
+        .dispatch_single_channel(id, &test_alert)
+        .await?;
+    Ok(Json(ApiResponse::ok(format!(
+        "Dispatched test alert successfully for channel {}",
+        id
+    ))))
 }
-

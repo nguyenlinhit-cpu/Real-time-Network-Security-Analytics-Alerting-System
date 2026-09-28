@@ -31,7 +31,6 @@ pub fn generate_tokens(
         jti: Some(Uuid::new_v4()),
     };
 
-
     let token = encode(
         &Header::default(),
         &access_claims,

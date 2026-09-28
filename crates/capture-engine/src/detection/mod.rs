@@ -26,4 +26,3 @@ pub trait DetectionRule: Send + Sync {
     /// Restores internal state from a persisted snapshot
     fn import_state(&mut self, _state: &serde_json::Value) {}
 }
-

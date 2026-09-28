@@ -11,7 +11,8 @@ fn test_password_hashing_and_verification() {
     let hashed = hash_password(raw_password).expect("Hashing should succeed");
 
     assert!(verify_password(raw_password, &hashed).expect("Verification should succeed"));
-    assert!(!verify_password("WrongPassword123!", &hashed).expect("Wrong password verification should return false"));
+    assert!(!verify_password("WrongPassword123!", &hashed)
+        .expect("Wrong password verification should return false"));
 }
 
 #[test]
@@ -27,7 +28,8 @@ fn test_jwt_generation_and_validation() {
         updated_at: chrono::Utc::now(),
     };
 
-    let (token, refresh_token) = generate_tokens(&user, secret, 24).expect("Token generation should succeed");
+    let (token, refresh_token) =
+        generate_tokens(&user, secret, 24).expect("Token generation should succeed");
     assert!(!token.is_empty());
     assert!(!refresh_token.is_empty());
 
@@ -71,11 +73,20 @@ fn test_rbac_permission_enforcement() {
 
     // Analyst should be allowed for analyst endpoints, but blocked from admin endpoints
     assert!(require_analyst_or_admin(&analyst_user).is_ok());
-    assert!(require_admin(&analyst_user).is_err(), "Analyst must be denied for admin-only actions");
+    assert!(
+        require_admin(&analyst_user).is_err(),
+        "Analyst must be denied for admin-only actions"
+    );
 
     // Viewer should be denied from both
-    assert!(require_analyst_or_admin(&viewer_user).is_err(), "Viewer must be denied for analyst actions");
-    assert!(require_admin(&viewer_user).is_err(), "Viewer must be denied for admin actions");
+    assert!(
+        require_analyst_or_admin(&viewer_user).is_err(),
+        "Viewer must be denied for analyst actions"
+    );
+    assert!(
+        require_admin(&viewer_user).is_err(),
+        "Viewer must be denied for admin actions"
+    );
 }
 
 #[test]
@@ -91,13 +102,16 @@ fn test_token_type_segregation() {
         updated_at: chrono::Utc::now(),
     };
 
-    let (token, refresh_token) = generate_tokens(&user, secret, 24).expect("Token generation should succeed");
-    
-    let access_claims = verify_token(&token, secret).expect("Access token verification should succeed");
+    let (token, refresh_token) =
+        generate_tokens(&user, secret, 24).expect("Token generation should succeed");
+
+    let access_claims =
+        verify_token(&token, secret).expect("Access token verification should succeed");
     assert_eq!(access_claims.token_type, "access");
     assert!(access_claims.jti.is_some());
 
-    let refresh_claims = verify_token(&refresh_token, secret).expect("Refresh token verification should succeed");
+    let refresh_claims =
+        verify_token(&refresh_token, secret).expect("Refresh token verification should succeed");
     assert_eq!(refresh_claims.token_type, "refresh");
     assert!(refresh_claims.jti.is_some());
     assert_ne!(access_claims.jti, refresh_claims.jti);

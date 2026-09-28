@@ -7,7 +7,6 @@ use uuid::Uuid;
 #[cfg_attr(feature = "sqlx", derive(sqlx::FromRow))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct TrafficEvent {
-
     pub time: DateTime<Utc>,
     pub id: Uuid,
     #[cfg_attr(feature = "utoipa", schema(value_type = String, example = "192.168.1.100/32"))]

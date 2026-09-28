@@ -45,7 +45,11 @@ async fn flush_traffic_batch(events: &[TrafficEvent], pool: Option<&Arc<PgPool>>
 
         let query = query_builder.build();
         if let Err(e) = query.execute(p.as_ref()).await {
-            tracing::warn!("Failed to persist batch of {} traffic events: {}", events.len(), e);
+            tracing::warn!(
+                "Failed to persist batch of {} traffic events: {}",
+                events.len(),
+                e
+            );
         } else {
             tracing::debug!("Persisted {} traffic events to TimescaleDB", events.len());
         }
@@ -76,7 +80,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Some(Arc::new(p))
             }
             Err(e) => {
-                warn!("Could not connect to database (running in standalone memory mode): {}", e);
+                warn!(
+                    "Could not connect to database (running in standalone memory mode): {}",
+                    e
+                );
                 None
             }
         }
@@ -137,10 +144,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let pool_rules = p.clone();
         let engine_rules = engine.clone();
         tokio::spawn(async move {
-            if let Ok(mut listener) = sqlx::postgres::PgListener::connect_with(pool_rules.as_ref()).await {
+            if let Ok(mut listener) =
+                sqlx::postgres::PgListener::connect_with(pool_rules.as_ref()).await
+            {
                 if listener.listen("rules_changed").await.is_ok() {
                     info!("📡 Detection engine subscribed to 'rules_changed' notification channel");
-                    while let Ok(_) = listener.recv().await {
+                    while listener.recv().await.is_ok() {
                         info!("🔄 Rule change notification received! Reloading rules configuration from DB...");
                         let mut eng = engine_rules.lock().await;
                         let _ = eng.reload_rules_from_db(pool_rules.as_ref()).await;
@@ -162,13 +171,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Err(e) = eng.save_state_to_file(&state_file_periodic) {
                 warn!("Periodic rule state snapshot failed: {}", e);
             } else {
-                tracing::debug!("Periodic rule state snapshot saved to {}", state_file_periodic);
+                tracing::debug!(
+                    "Periodic rule state snapshot saved to {}",
+                    state_file_periodic
+                );
             }
         }
     });
 
     if simulation_mode {
-        info!("Running in SIMULATION MODE on interface '{}'", interface_name);
+        info!(
+            "Running in SIMULATION MODE on interface '{}'",
+            interface_name
+        );
         info!("Demo Attack Scenario can be triggered automatically.");
 
         let mut sim = TrafficSimulator::new(interface_name.clone());
@@ -191,36 +206,62 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // Set fixed scenario if specified
             match scenario_type.to_lowercase().as_str() {
-                "port_scan" => sim.set_scenario(AttackScenario::PortScan { target_ip, start_port: 20, port_count: 30 }),
-                "syn_flood" => sim.set_scenario(AttackScenario::SynFlood { target_ip, packet_count: 250 }),
-                "brute_force" => sim.set_scenario(AttackScenario::BruteForce { target_ip, port: 22, attempts: 10 }),
+                "port_scan" => sim.set_scenario(AttackScenario::PortScan {
+                    target_ip,
+                    start_port: 20,
+                    port_count: 30,
+                }),
+                "syn_flood" => sim.set_scenario(AttackScenario::SynFlood {
+                    target_ip,
+                    packet_count: 250,
+                }),
+                "brute_force" => sim.set_scenario(AttackScenario::BruteForce {
+                    target_ip,
+                    port: 22,
+                    attempts: 10,
+                }),
                 "arp_spoof" => sim.set_scenario(AttackScenario::ArpSpoof {
                     target_ip: "192.168.1.1/32".parse().unwrap(),
                     fake_mac: "de:ad:be:ef:00:01".to_string(),
                 }),
                 "dns_tunnel" => sim.set_scenario(AttackScenario::DnsTunneling { query_count: 15 }),
-                "volume_spike" => sim.set_scenario(AttackScenario::TrafficVolumeSpike { multiplier: 10 }),
+                "volume_spike" => {
+                    sim.set_scenario(AttackScenario::TrafficVolumeSpike { multiplier: 10 })
+                }
                 _ => {}
             }
 
             loop {
                 // If "all", periodically rotate all 6 attack scenarios
-                if scenario_type.eq_ignore_ascii_case("all") && packet_count % 50 == 0 {
+                if scenario_type.eq_ignore_ascii_case("all") && packet_count.is_multiple_of(50) {
                     match scenario_idx % 6 {
                         0 => {
                             info!("▶️ [DEMO SCENARIO] Triggering Port Scan attack against 192.168.1.50");
-                            sim.set_scenario(AttackScenario::PortScan { target_ip, start_port: 20, port_count: 30 });
+                            sim.set_scenario(AttackScenario::PortScan {
+                                target_ip,
+                                start_port: 20,
+                                port_count: 30,
+                            });
                         }
                         1 => {
                             info!("▶️ [DEMO SCENARIO] Triggering SYN Flood attack against 192.168.1.50");
-                            sim.set_scenario(AttackScenario::SynFlood { target_ip, packet_count: 250 });
+                            sim.set_scenario(AttackScenario::SynFlood {
+                                target_ip,
+                                packet_count: 250,
+                            });
                         }
                         2 => {
                             info!("▶️ [DEMO SCENARIO] Triggering SSH Brute-Force attack against 192.168.1.50:22");
-                            sim.set_scenario(AttackScenario::BruteForce { target_ip, port: 22, attempts: 10 });
+                            sim.set_scenario(AttackScenario::BruteForce {
+                                target_ip,
+                                port: 22,
+                                attempts: 10,
+                            });
                         }
                         3 => {
-                            info!("▶️ [DEMO SCENARIO] Triggering ARP Spoofing attack on 192.168.1.1");
+                            info!(
+                                "▶️ [DEMO SCENARIO] Triggering ARP Spoofing attack on 192.168.1.1"
+                            );
                             sim.set_scenario(AttackScenario::ArpSpoof {
                                 target_ip: "192.168.1.1/32".parse().unwrap(),
                                 fake_mac: "de:ad:be:ef:00:01".to_string(),
@@ -243,7 +284,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     engine_sim.lock().await.process_event(&event).await;
                     let _ = traffic_tx_sim.try_send(event);
 
-                    if packet_count % 100 == 0 {
+                    if packet_count.is_multiple_of(100) {
                         info!("Processed {} simulated packets successfully", packet_count);
                     }
                 }
@@ -252,7 +293,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         });
     } else {
-        info!("Running in LIVE CAPTURE mode on interface '{}'", interface_name);
+        info!(
+            "Running in LIVE CAPTURE mode on interface '{}'",
+            interface_name
+        );
         match LiveCapture::new(&interface_name) {
             Ok(mut live) => {
                 let engine_live = engine.clone();
@@ -265,7 +309,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 });
             }
             Err(e) => {
-                warn!("Could not start live capture on interface '{}': {}. Switching to simulation.", interface_name, e);
+                warn!(
+                    "Could not start live capture on interface '{}': {}. Switching to simulation.",
+                    interface_name, e
+                );
             }
         }
     }
@@ -274,7 +321,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{signal, SignalKind};
-        let mut sigterm = signal(SignalKind::terminate()).expect("Failed to register SIGTERM handler");
+        let mut sigterm =
+            signal(SignalKind::terminate()).expect("Failed to register SIGTERM handler");
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
                 info!("Received SIGINT signal, shutting down...");

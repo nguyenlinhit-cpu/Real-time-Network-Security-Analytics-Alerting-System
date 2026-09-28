@@ -51,5 +51,3 @@ impl AppState {
         self.revoked_tokens.insert(jti, expiry);
     }
 }
-
-

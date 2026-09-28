@@ -1,5 +1,7 @@
 use chrono::Utc;
-use common::models::{Alert, AlertSeverity, AlertStatus, DetectionRule as RuleModel, RuleType, TrafficEvent};
+use common::models::{
+    Alert, AlertSeverity, AlertStatus, DetectionRule as RuleModel, RuleType, TrafficEvent,
+};
 use std::collections::HashMap;
 use std::time::Instant;
 use uuid::Uuid;
@@ -70,7 +72,13 @@ impl DetectionRule for DnsTunnelDetector {
     fn update_config(&mut self, config: &RuleModel) {
         self.rule_id = Some(config.id);
         self.is_enabled = config.is_enabled;
-        self.entropy_threshold = config.threshold_value;
+        // Shannon entropy of DNS label typically ranges from 1.0 to 5.5.
+        // If config provides an invalid threshold (> 10.0), clamp or fallback to 3.8 (Mục 4)
+        if config.threshold_value > 0.0 && config.threshold_value <= 10.0 {
+            self.entropy_threshold = config.threshold_value;
+        } else {
+            self.entropy_threshold = 3.8;
+        }
     }
 
     fn evaluate(&mut self, event: &TrafficEvent) -> Option<Alert> {
@@ -80,13 +88,10 @@ impl DetectionRule for DnsTunnelDetector {
 
         // Extract DNS query domain if present in flags (e.g. "DNS:xyz.tunnel.net")
         let domain_prefix = "DNS:";
-        let domain = if let Some(idx) = event.flags.find(domain_prefix) {
-            let start = idx + domain_prefix.len();
-            let slice = &event.flags[start..];
-            slice.split(',').next().unwrap_or(slice)
-        } else {
-            return None;
-        };
+        let idx = event.flags.find(domain_prefix)?;
+        let start = idx + domain_prefix.len();
+        let slice = &event.flags[start..];
+        let domain = slice.split(',').next().unwrap_or(slice);
 
         let subdomain = domain.split('.').next().unwrap_or(domain);
 

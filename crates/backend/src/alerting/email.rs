@@ -1,8 +1,7 @@
 use common::models::{Alert, ChannelType};
 use lettre::{
-    message::header::ContentType,
-    transport::smtp::authentication::Credentials,
-    AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor,
+    message::header::ContentType, transport::smtp::authentication::Credentials, AsyncSmtpTransport,
+    AsyncTransport, Message, Tokio1Executor,
 };
 use std::future::Future;
 use std::pin::Pin;
@@ -30,7 +29,10 @@ impl NotificationChannel for EmailChannel {
         ChannelType::Email
     }
 
-    fn send<'a>(&'a self, alert: &'a Alert) -> Pin<Box<dyn Future<Output = Result<(), AppError>> + Send + 'a>> {
+    fn send<'a>(
+        &'a self,
+        alert: &'a Alert,
+    ) -> Pin<Box<dyn Future<Output = Result<(), AppError>> + Send + 'a>> {
         Box::pin(async move {
             let subject = format!("[SecNet Alert - {:?}] {}", alert.severity, alert.title);
             let body = format!(
@@ -53,17 +55,28 @@ impl NotificationChannel for EmailChannel {
             );
 
             let email = Message::builder()
-                .from(self.from_email.parse().map_err(|e| AppError::Internal(format!("Invalid from email: {}", e)))?)
-                .to(self.to_email.parse().map_err(|e| AppError::Internal(format!("Invalid to email: {}", e)))?)
+                .from(
+                    self.from_email
+                        .parse()
+                        .map_err(|e| AppError::Internal(format!("Invalid from email: {}", e)))?,
+                )
+                .to(self
+                    .to_email
+                    .parse()
+                    .map_err(|e| AppError::Internal(format!("Invalid to email: {}", e)))?)
                 .subject(subject)
                 .header(ContentType::TEXT_PLAIN)
                 .body(body)
                 .map_err(|e| AppError::Internal(format!("Failed to build email message: {}", e)))?;
 
-            info!("📧 [EMAIL ALERT] Dispatching to {}: {}", self.to_email, alert.title);
+            info!(
+                "📧 [EMAIL ALERT] Dispatching to {}: {}",
+                self.to_email, alert.title
+            );
 
-            let mut mailer_builder = AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&self.smtp_host)
-                .port(self.smtp_port);
+            let mut mailer_builder =
+                AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&self.smtp_host)
+                    .port(self.smtp_port);
 
             if let (Some(u), Some(p)) = (&self.username, &self.password) {
                 mailer_builder = mailer_builder.credentials(Credentials::new(u.clone(), p.clone()));
@@ -77,8 +90,9 @@ impl NotificationChannel for EmailChannel {
                     Ok(())
                 }
                 Err(e) => {
-                    warn!("SMTP delivery failed (mock logging fallback): {}", e);
-                    Ok(())
+                    let msg = format!("SMTP delivery failed: {}", e);
+                    warn!("{}", msg);
+                    Err(AppError::Internal(msg))
                 }
             }
         })

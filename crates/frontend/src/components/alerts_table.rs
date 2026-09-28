@@ -16,26 +16,30 @@ pub fn AlertsTable(
 
     let filtered_alerts = Memo::new(move |_| {
         let query = search_query.get().to_lowercase();
-        alerts.get().into_iter().filter(|a| {
-            if let Some(sev) = filter_severity.get() {
-                if a.severity != sev {
-                    return false;
+        alerts
+            .get()
+            .into_iter()
+            .filter(|a| {
+                if let Some(sev) = filter_severity.get() {
+                    if a.severity != sev {
+                        return false;
+                    }
                 }
-            }
-            if let Some(st) = filter_status.get() {
-                if a.status != st {
-                    return false;
+                if let Some(st) = filter_status.get() {
+                    if a.status != st {
+                        return false;
+                    }
                 }
-            }
-            if !query.is_empty() {
-                let ip_str = format!("{} {}", a.src_ip, a.dst_ip).to_lowercase();
-                let title_str = a.title.to_lowercase();
-                if !ip_str.contains(&query) && !title_str.contains(&query) {
-                    return false;
+                if !query.is_empty() {
+                    let ip_str = format!("{} {}", a.src_ip, a.dst_ip).to_lowercase();
+                    let title_str = a.title.to_lowercase();
+                    if !ip_str.contains(&query) && !title_str.contains(&query) {
+                        return false;
+                    }
                 }
-            }
-            true
-        }).collect::<Vec<Alert>>()
+                true
+            })
+            .collect::<Vec<Alert>>()
     });
 
     let on_update_status = move |id: Uuid, new_status: AlertStatus| {

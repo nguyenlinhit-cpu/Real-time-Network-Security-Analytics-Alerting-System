@@ -16,21 +16,25 @@ pub fn TrafficPage(
         let query = search_text.get().to_lowercase();
         let proto = selected_proto.get();
 
-        traffic.get().into_iter().filter(|t| {
-            if let Some(ref p) = proto {
-                if !t.protocol.eq_ignore_ascii_case(p) {
-                    return false;
+        traffic
+            .get()
+            .into_iter()
+            .filter(|t| {
+                if let Some(ref p) = proto {
+                    if !t.protocol.eq_ignore_ascii_case(p) {
+                        return false;
+                    }
                 }
-            }
-            if !query.is_empty() {
-                let s_ip = t.src_ip.to_string().to_lowercase();
-                let d_ip = t.dst_ip.to_string().to_lowercase();
-                if !s_ip.contains(&query) && !d_ip.contains(&query) {
-                    return false;
+                if !query.is_empty() {
+                    let s_ip = t.src_ip.to_string().to_lowercase();
+                    let d_ip = t.dst_ip.to_string().to_lowercase();
+                    if !s_ip.contains(&query) && !d_ip.contains(&query) {
+                        return false;
+                    }
                 }
-            }
-            true
-        }).collect::<Vec<TrafficEvent>>()
+                true
+            })
+            .collect::<Vec<TrafficEvent>>()
     });
 
     let proto_tab_class = move |val: Option<&str>| {

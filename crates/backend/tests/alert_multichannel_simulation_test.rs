@@ -1,9 +1,7 @@
+use axum::{http::StatusCode, routing::post, Router};
 use backend::alerting::{
-    email::EmailChannel,
-    telegram::TelegramChannel,
-    throttler::AlertThrottler,
-    traits::NotificationChannel,
-    webhook::WebhookChannel,
+    email::EmailChannel, telegram::TelegramChannel, throttler::AlertThrottler,
+    traits::NotificationChannel, webhook::WebhookChannel,
 };
 use chrono::Utc;
 use common::models::{Alert, AlertSeverity, AlertStatus};
@@ -30,11 +28,37 @@ fn make_test_alert(severity: AlertSeverity, src_ip: &str) -> Alert {
 async fn test_multi_channel_alert_simulation() {
     let alert = make_test_alert(AlertSeverity::Critical, "192.168.1.250/32");
 
-    // 1. Email Channel Test
+    // Start local mock HTTP server (Mục 56 - no external requests)
+    let mock_app = Router::new()
+        .route(
+            "/webhook",
+            post(|| async { (StatusCode::OK, "{\"status\":\"ok\"}") }),
+        )
+        .route(
+            "/bot123456789:MOCK_TOKEN/sendMessage",
+            post(|| async { (StatusCode::OK, "{\"ok\":true}") }),
+        )
+        .route(
+            "/bot_error:FAIL_TOKEN/sendMessage",
+            post(|| async {
+                (
+                    StatusCode::BAD_REQUEST,
+                    "{\"ok\":false,\"description\":\"bad request\"}",
+                )
+            }),
+        );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        axum::serve(listener, mock_app).await.unwrap();
+    });
+
+    // 1. Email Channel Test (Unreachable SMTP must return error - Mục 36)
     let email_ch = EmailChannel {
         name: "Security Operations Email".to_string(),
         smtp_host: "127.0.0.1".to_string(),
-        smtp_port: 2525,
+        smtp_port: 25255, // non-listening port
         username: None,
         password: None,
         from_email: "alerts@secnet.local".to_string(),
@@ -42,26 +66,65 @@ async fn test_multi_channel_alert_simulation() {
     };
     assert_eq!(email_ch.name(), "Security Operations Email");
     let email_res = email_ch.send(&alert).await;
-    assert!(email_res.is_ok(), "Email dispatch fallback must handle local dev cleanly");
-
-    // 2. Webhook Channel Test
-    let webhook_ch = WebhookChannel::new(
-        "SIEM Webhook".to_string(),
-        "https://93.184.216.34:9999/api/v1/alerts".to_string(),
+    assert!(
+        email_res.is_err(),
+        "Unreachable SMTP server must return error instead of Ok"
     );
-    assert_eq!(webhook_ch.name(), "SIEM Webhook");
-    let webhook_res = webhook_ch.send(&alert).await;
-    assert!(webhook_res.is_ok(), "Webhook dispatch must handle unreachable target gracefully");
 
-    // 3. Telegram Channel Test
-    let telegram_ch = TelegramChannel::new(
+    // 2. Webhook Channel Test with mock server
+    let webhook_mock = WebhookChannel::with_full_options(
+        "SIEM Webhook".to_string(),
+        format!("http://127.0.0.1:{}/webhook", port),
+        false,
+        true, // allow loopback for test
+    );
+    assert_eq!(webhook_mock.name(), "SIEM Webhook");
+    let webhook_mock_res = webhook_mock.send(&alert).await;
+    assert!(
+        webhook_mock_res.is_ok(),
+        "Webhook delivery to mock server must succeed: {:?}",
+        webhook_mock_res
+    );
+
+    // 3. Webhook SSRF Protection Test (Default must block 127.0.0.1)
+    let webhook_ssrf_blocked = WebhookChannel::with_options(
+        "SIEM Webhook SSRF Test".to_string(),
+        format!("http://127.0.0.1:{}/webhook", port),
+        false, // http allowed, but private IP must be blocked
+    );
+    let ssrf_res = webhook_ssrf_blocked.send(&alert).await;
+    assert!(
+        ssrf_res.is_err(),
+        "SSRF protection must block private/loopback IPs by default"
+    );
+
+    // 4. Telegram Channel Test with mock server
+    let telegram_mock = TelegramChannel::with_base_url(
         "Telegram SOC Feed".to_string(),
         "123456789:MOCK_TOKEN".to_string(),
         "-1001234567890".to_string(),
+        format!("http://127.0.0.1:{}", port),
     );
-    assert_eq!(telegram_ch.name(), "Telegram SOC Feed");
-    let tg_res = telegram_ch.send(&alert).await;
-    assert!(tg_res.is_ok(), "Telegram dispatch must handle mock token gracefully");
+    assert_eq!(telegram_mock.name(), "Telegram SOC Feed");
+    let tg_mock_res = telegram_mock.send(&alert).await;
+    assert!(
+        tg_mock_res.is_ok(),
+        "Telegram delivery to mock server must succeed: {:?}",
+        tg_mock_res
+    );
+
+    // 5. Telegram Error Handling Test (4xx/5xx must return Err - Mục 36)
+    let telegram_fail = TelegramChannel::with_base_url(
+        "Telegram Failing Feed".to_string(),
+        "FAIL_TOKEN".to_string(),
+        "-1001234567890".to_string(),
+        format!("http://127.0.0.1:{}", port),
+    );
+    let tg_fail_res = telegram_fail.send(&alert).await;
+    assert!(
+        tg_fail_res.is_err(),
+        "Telegram non-2xx status must return error instead of Ok"
+    );
 }
 
 #[test]

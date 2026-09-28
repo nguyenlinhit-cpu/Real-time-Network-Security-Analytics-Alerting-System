@@ -31,7 +31,7 @@ pub async fn get_blocklist(
         SELECT id, ip_address, reason, blocked_at, blocked_until
         FROM blocked_ips
         ORDER BY blocked_at DESC
-        "#
+        "#,
     )
     .fetch_all(&state.pool)
     .await?;
@@ -56,22 +56,25 @@ pub async fn add_to_blocklist(
     Json(payload): Json<CreateBlockedIpDto>,
 ) -> Result<Json<ApiResponse<BlockedIp>>, AppError> {
     require_admin(&current_user)?;
-    payload.validate().map_err(|e| AppError::ValidationError(e.to_string()))?;
+    payload
+        .validate()
+        .map_err(|e| AppError::ValidationError(e.to_string()))?;
 
-    let ip: IpNetwork = payload.ip_address.parse().map_err(|e| {
-        AppError::BadRequest(format!("Invalid IP address format: {}", e))
-    })?;
+    let ip: IpNetwork = payload
+        .ip_address
+        .parse()
+        .map_err(|e| AppError::BadRequest(format!("Invalid IP address format: {}", e)))?;
 
-    let blocked_until = payload.duration_seconds.map(|secs| {
-        chrono::Utc::now() + chrono::Duration::seconds(secs)
-    });
+    let blocked_until = payload
+        .duration_seconds
+        .map(|secs| chrono::Utc::now() + chrono::Duration::seconds(secs));
 
     let entry = sqlx::query_as::<_, BlockedIp>(
         r#"
         INSERT INTO blocked_ips (ip_address, reason, blocked_until)
         VALUES ($1, $2, $3)
         RETURNING id, ip_address, reason, blocked_at, blocked_until
-        "#
+        "#,
     )
     .bind(ip)
     .bind(&payload.reason)
@@ -119,7 +122,10 @@ pub async fn remove_from_blocklist(
         .rows_affected();
 
     if rows_affected == 0 {
-        return Err(AppError::NotFound(format!("Blocklist entry {} not found", id)));
+        return Err(AppError::NotFound(format!(
+            "Blocklist entry {} not found",
+            id
+        )));
     }
 
     let _ = sqlx::query!(
@@ -131,5 +137,8 @@ pub async fn remove_from_blocklist(
     .execute(&state.pool)
     .await;
 
-    Ok(Json(ApiResponse::ok(format!("IP block entry {} removed", id))))
+    Ok(Json(ApiResponse::ok(format!(
+        "IP block entry {} removed",
+        id
+    ))))
 }

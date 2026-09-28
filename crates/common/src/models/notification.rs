@@ -5,29 +5,26 @@ use validator::Validate;
 
 use super::alert::AlertSeverity;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 #[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
-#[cfg_attr(feature = "sqlx", sqlx(type_name = "channel_type", rename_all = "lowercase"))]
+#[cfg_attr(
+    feature = "sqlx",
+    sqlx(type_name = "channel_type", rename_all = "lowercase")
+)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub enum ChannelType {
+    #[default]
     Email,
     Webhook,
     Telegram,
     Slack,
 }
 
-impl Default for ChannelType {
-    fn default() -> Self {
-        Self::Email
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "sqlx", derive(sqlx::FromRow))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct NotificationChannel {
-
     pub id: Uuid,
     pub name: String,
     pub r#type: ChannelType,
@@ -59,4 +56,3 @@ pub struct UpdateNotificationChannelDto {
     pub min_severity: Option<AlertSeverity>,
     pub is_enabled: Option<bool>,
 }
-

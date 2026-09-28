@@ -1,5 +1,7 @@
 use chrono::Utc;
-use common::models::{Alert, AlertSeverity, AlertStatus, DetectionRule as RuleModel, RuleType, TrafficEvent};
+use common::models::{
+    Alert, AlertSeverity, AlertStatus, DetectionRule as RuleModel, RuleType, TrafficEvent,
+};
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
@@ -62,7 +64,12 @@ impl ZScoreAnomalyDetector {
 
         // Combine sliding window mean with EWMA to detect high-frequency sudden spikes
         let mean = self.history.iter().sum::<f64>() / self.history.len() as f64;
-        let variance = self.history.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / self.history.len() as f64;
+        let variance = self
+            .history
+            .iter()
+            .map(|&x| (x - mean).powi(2))
+            .sum::<f64>()
+            / self.history.len() as f64;
         let std_dev = variance.sqrt().max(1.0);
 
         let ewma_z = if let (Some(m), Some(v)) = (self.ewma_mean, self.ewma_variance) {
@@ -77,7 +84,6 @@ impl ZScoreAnomalyDetector {
         Some(window_z.max(ewma_z))
     }
 }
-
 
 impl DetectionRule for ZScoreAnomalyDetector {
     fn name(&self) -> &str {
@@ -176,4 +182,3 @@ impl DetectionRule for ZScoreAnomalyDetector {
         }
     }
 }
-

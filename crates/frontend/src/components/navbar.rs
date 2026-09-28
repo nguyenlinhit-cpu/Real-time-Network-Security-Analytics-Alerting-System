@@ -1,7 +1,7 @@
-use common::models::UserPublicDto;
-use leptos::prelude::*;
 use crate::api::client::ApiClient;
 use crate::components::icons::{IconAlert, IconMoon, IconRadar, IconSun};
+use common::models::UserPublicDto;
+use leptos::prelude::*;
 
 #[component]
 pub fn Navbar(
@@ -11,7 +11,6 @@ pub fn Navbar(
     is_ws_connected: ReadSignal<bool>,
     critical_count: Signal<usize>,
 ) -> impl IntoView {
-
     let on_logout = move |_| {
         leptos::task::spawn_local(async move {
             ApiClient::api_logout().await;

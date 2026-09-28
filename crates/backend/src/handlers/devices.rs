@@ -27,7 +27,7 @@ pub async fn get_devices(
             device_type, first_seen, last_seen, is_trusted
         FROM devices
         ORDER BY last_seen DESC
-        "#
+        "#,
     )
     .fetch_all(&state.pool)
     .await?;
@@ -68,7 +68,7 @@ pub async fn get_device_history(
         WHERE src_ip = $1 OR dst_ip = $1
         ORDER BY time DESC
         LIMIT 50
-        "#
+        "#,
     )
     .bind(device.ip_address)
     .fetch_all(&state.pool)

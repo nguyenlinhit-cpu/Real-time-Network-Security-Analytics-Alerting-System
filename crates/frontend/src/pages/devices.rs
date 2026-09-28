@@ -26,17 +26,21 @@ pub fn DevicesPage() -> impl IntoView {
 
     let filtered_devices = Memo::new(move |_| {
         let q = search_query.get().to_lowercase();
-        devices.get().into_iter().filter(|d| {
-            if q.is_empty() {
-                return true;
-            }
-            let ip = d.ip_address.to_string().to_lowercase();
-            let mac = d.mac_address.clone().unwrap_or_default().to_lowercase();
-            let host = d.hostname.clone().unwrap_or_default().to_lowercase();
-            let dev_type = d.device_type.to_lowercase();
+        devices
+            .get()
+            .into_iter()
+            .filter(|d| {
+                if q.is_empty() {
+                    return true;
+                }
+                let ip = d.ip_address.to_string().to_lowercase();
+                let mac = d.mac_address.clone().unwrap_or_default().to_lowercase();
+                let host = d.hostname.clone().unwrap_or_default().to_lowercase();
+                let dev_type = d.device_type.to_lowercase();
 
-            ip.contains(&q) || mac.contains(&q) || host.contains(&q) || dev_type.contains(&q)
-        }).collect::<Vec<Device>>()
+                ip.contains(&q) || mac.contains(&q) || host.contains(&q) || dev_type.contains(&q)
+            })
+            .collect::<Vec<Device>>()
     });
 
     let on_view_history = move |dev: Device| {

@@ -1,5 +1,7 @@
 use chrono::Utc;
-use common::models::{Alert, AlertSeverity, AlertStatus, DetectionRule as RuleModel, RuleType, TrafficEvent};
+use common::models::{
+    Alert, AlertSeverity, AlertStatus, DetectionRule as RuleModel, RuleType, TrafficEvent,
+};
 use ipnetwork::IpNetwork;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -60,9 +62,8 @@ impl DetectionRule for SynFloodDetector {
         }
 
         // Only process TCP SYN packets without ACK
-        let is_syn_only = event.protocol == "TCP"
-            && event.flags.contains("SYN")
-            && !event.flags.contains("ACK");
+        let is_syn_only =
+            event.protocol == "TCP" && event.flags.contains("SYN") && !event.flags.contains("ACK");
 
         if !is_syn_only {
             return None;

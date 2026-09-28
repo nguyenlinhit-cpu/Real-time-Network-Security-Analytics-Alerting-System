@@ -49,7 +49,8 @@ impl SimpleRedisClient {
                 .get_host_port()
                 .ok_or_else(|| "Redis address not configured".to_string())?;
 
-            match tokio::time::timeout(Duration::from_secs(2), TcpStream::connect(&host_port)).await {
+            match tokio::time::timeout(Duration::from_secs(2), TcpStream::connect(&host_port)).await
+            {
                 Ok(Ok(stream)) => {
                     info!("Connected to distributed Redis instance at {}", host_port);
                     **guard = Some(BufReader::new(stream));
@@ -57,7 +58,10 @@ impl SimpleRedisClient {
                 }
                 Ok(Err(e)) => {
                     self.connected.store(false, Ordering::Relaxed);
-                    return Err(format!("Failed to connect to Redis at {}: {}", host_port, e));
+                    return Err(format!(
+                        "Failed to connect to Redis at {}: {}",
+                        host_port, e
+                    ));
                 }
                 Err(_) => {
                     self.connected.store(false, Ordering::Relaxed);
@@ -90,11 +94,17 @@ impl SimpleRedisClient {
             return Err(format!("Read error from Redis: {}", e));
         }
 
-        let count: i64 = if line.starts_with(':') {
-            line[1..].trim().parse().map_err(|e| format!("Invalid INCR response: {}", e))?
+        let count: i64 = if let Some(stripped) = line.trim().strip_prefix(':') {
+            stripped
+                .trim()
+                .parse()
+                .map_err(|e| format!("Invalid INCR response: {}", e))?
         } else {
             *guard = None;
-            return Err(format!("Unexpected INCR response from Redis: {}", line.trim()));
+            return Err(format!(
+                "Unexpected INCR response from Redis: {}",
+                line.trim()
+            ));
         };
 
         // If newly created counter (count == 1), set expiration TTL
@@ -182,8 +192,8 @@ impl SimpleRedisClient {
         }
 
         let trimmed = line.trim();
-        if trimmed.starts_with(':') {
-            let val: i64 = trimmed[1..].parse().unwrap_or(0);
+        if let Some(stripped) = trimmed.strip_prefix(':') {
+            let val: i64 = stripped.parse().unwrap_or(0);
             Ok(val > 0)
         } else {
             Ok(false)
@@ -240,8 +250,8 @@ impl SimpleRedisClient {
         }
 
         let trimmed = line.trim();
-        if trimmed.starts_with(':') {
-            let val: i64 = trimmed[1..].parse().unwrap_or(0);
+        if let Some(stripped) = trimmed.strip_prefix(':') {
+            let val: i64 = stripped.parse().unwrap_or(0);
             Ok(val > 0)
         } else {
             Ok(false)
@@ -281,4 +291,3 @@ impl SimpleRedisClient {
         }
     }
 }
-

@@ -28,14 +28,23 @@ fn test_alert_throttler_deduplication() {
     let src_ip: IpNetwork = "192.168.1.200/32".parse().unwrap();
 
     // First time should not be throttled
-    assert!(!throttler.should_throttle(rule_id, src_ip), "First alert must not be throttled");
+    assert!(
+        !throttler.should_throttle(rule_id, src_ip),
+        "First alert must not be throttled"
+    );
 
     // Immediate second time with same rule_id and src_ip MUST be throttled
-    assert!(throttler.should_throttle(rule_id, src_ip), "Immediate duplicate alert must be throttled");
+    assert!(
+        throttler.should_throttle(rule_id, src_ip),
+        "Immediate duplicate alert must be throttled"
+    );
 
     // Different source IP should NOT be throttled
     let other_ip: IpNetwork = "192.168.1.201/32".parse().unwrap();
-    assert!(!throttler.should_throttle(rule_id, other_ip), "Different IP must not be throttled");
+    assert!(
+        !throttler.should_throttle(rule_id, other_ip),
+        "Different IP must not be throttled"
+    );
 }
 
 #[tokio::test]
@@ -45,9 +54,11 @@ async fn test_webhook_channel_dispatch() {
         "Dummy Webhook".to_string(),
         "http://127.0.0.1:9999/dummy-webhook".to_string(),
     );
-    
+
     // Webhook rejects loopback IP 127.0.0.1 due to SSRF protection
     let result = webhook.send(&alert).await;
-    assert!(result.is_err(), "Loopback webhook target must be rejected by SSRF protection");
+    assert!(
+        result.is_err(),
+        "Loopback webhook target must be rejected by SSRF protection"
+    );
 }
-

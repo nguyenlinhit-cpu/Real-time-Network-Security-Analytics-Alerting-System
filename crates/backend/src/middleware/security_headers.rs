@@ -13,10 +13,7 @@ pub async fn security_headers_middleware(request: Request, next: Next) -> Respon
         header::X_CONTENT_TYPE_OPTIONS,
         HeaderValue::from_static("nosniff"),
     );
-    headers.insert(
-        header::X_FRAME_OPTIONS,
-        HeaderValue::from_static("DENY"),
-    );
+    headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
     headers.insert(
         header::X_XSS_PROTECTION,
         HeaderValue::from_static("1; mode=block"),

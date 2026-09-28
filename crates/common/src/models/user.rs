@@ -3,21 +3,19 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use validator::Validate;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 #[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
-#[cfg_attr(feature = "sqlx", sqlx(type_name = "user_role", rename_all = "lowercase"))]
+#[cfg_attr(
+    feature = "sqlx",
+    sqlx(type_name = "user_role", rename_all = "lowercase")
+)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub enum UserRole {
     Admin,
     Analyst,
+    #[default]
     Viewer,
-}
-
-impl Default for UserRole {
-    fn default() -> Self {
-        Self::Viewer
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,7 +35,11 @@ pub struct User {
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct CreateUserDto {
-    #[validate(length(min = 3, max = 50, message = "Username must be between 3 and 50 characters"))]
+    #[validate(length(
+        min = 3,
+        max = 50,
+        message = "Username must be between 3 and 50 characters"
+    ))]
     pub username: String,
     #[validate(email(message = "Invalid email format"))]
     pub email: String,
@@ -98,4 +100,3 @@ pub struct UserClaims {
     #[serde(default)]
     pub jti: Option<Uuid>,
 }
-

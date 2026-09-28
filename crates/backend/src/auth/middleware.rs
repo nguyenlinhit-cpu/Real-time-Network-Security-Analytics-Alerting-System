@@ -23,13 +23,16 @@ pub async fn auth_middleware(
     {
         auth_header
             .strip_prefix("Bearer ")
-            .ok_or_else(|| AppError::Unauthorized("Invalid Authorization header format".to_string()))?
+            .ok_or_else(|| {
+                AppError::Unauthorized("Invalid Authorization header format".to_string())
+            })?
             .to_string()
     } else if let Some(query) = request.uri().query() {
         // Security Hardening: Query string tokens are only permitted on WebSocket upgrades
         if !is_ws_route {
             return Err(AppError::Unauthorized(
-                "Query parameter authentication is strictly restricted to WebSocket connections".to_string(),
+                "Query parameter authentication is strictly restricted to WebSocket connections"
+                    .to_string(),
             ));
         }
 
@@ -45,7 +48,9 @@ pub async fn auth_middleware(
             })
             .ok_or_else(|| AppError::Unauthorized("Missing Authorization header".to_string()))?
     } else {
-        return Err(AppError::Unauthorized("Missing Authorization header".to_string()));
+        return Err(AppError::Unauthorized(
+            "Missing Authorization header".to_string(),
+        ));
     };
 
     let claims = verify_token(&token, &state.jwt_secret)?;
@@ -53,7 +58,8 @@ pub async fn auth_middleware(
     // Security Hardening: Prevent refresh tokens from impersonating access tokens
     if claims.token_type != "access" {
         return Err(AppError::Unauthorized(
-            "Access forbidden: refresh tokens cannot be used to authenticate API endpoints".to_string(),
+            "Access forbidden: refresh tokens cannot be used to authenticate API endpoints"
+                .to_string(),
         ));
     }
 
@@ -68,7 +74,6 @@ pub async fn auth_middleware(
 
     Ok(next.run(request).await)
 }
-
 
 /// Extractor to retrieve authenticated UserClaims from request extensions
 pub struct CurrentUser(pub UserClaims);

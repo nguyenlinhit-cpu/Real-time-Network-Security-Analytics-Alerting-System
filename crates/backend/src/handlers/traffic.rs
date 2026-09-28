@@ -45,7 +45,7 @@ pub async fn get_traffic(
           AND ($5::TEXT IS NULL OR protocol = $5)
         ORDER BY time DESC
         LIMIT $6 OFFSET $7
-        "#
+        "#,
     )
     .bind(filter.from)
     .bind(filter.to)

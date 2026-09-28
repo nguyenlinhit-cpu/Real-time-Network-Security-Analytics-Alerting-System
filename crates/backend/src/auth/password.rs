@@ -1,8 +1,8 @@
+use crate::error::AppError;
 use argon2::{
     password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
     Argon2,
 };
-use crate::error::AppError;
 
 pub fn hash_password(password: &str) -> Result<String, AppError> {
     let salt = SaltString::generate(&mut OsRng);

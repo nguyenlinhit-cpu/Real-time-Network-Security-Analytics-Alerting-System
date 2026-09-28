@@ -105,8 +105,10 @@ impl LiveCapture {
         // 1. Support ARP Packet Parsing (Mục 3)
         if eth.get_ethertype() == EtherTypes::Arp {
             if let Some(arp) = ArpPacket::new(eth_payload) {
-                let src = IpNetwork::new(std::net::IpAddr::V4(arp.get_sender_proto_addr()), 32).ok()?;
-                let dst = IpNetwork::new(std::net::IpAddr::V4(arp.get_target_proto_addr()), 32).ok()?;
+                let src =
+                    IpNetwork::new(std::net::IpAddr::V4(arp.get_sender_proto_addr()), 32).ok()?;
+                let dst =
+                    IpNetwork::new(std::net::IpAddr::V4(arp.get_target_proto_addr()), 32).ok()?;
                 return Some(TrafficEvent {
                     time: Utc::now(),
                     id: Uuid::new_v4(),
@@ -133,7 +135,12 @@ impl LiveCapture {
                 if eth_payload.len() < header_len {
                     return None;
                 }
-                (src, dst, ip.get_next_level_protocol(), &eth_payload[header_len..])
+                (
+                    src,
+                    dst,
+                    ip.get_next_level_protocol(),
+                    &eth_payload[header_len..],
+                )
             }
             EtherTypes::Ipv6 => {
                 let ip = Ipv6Packet::new(eth_payload)?;
@@ -159,11 +166,21 @@ impl LiveCapture {
                     src_port = tcp.get_source() as i32;
                     dst_port = tcp.get_destination() as i32;
                     let mut flag_list = Vec::new();
-                    if tcp.get_flags() & 0x02 != 0 { flag_list.push("SYN"); }
-                    if tcp.get_flags() & 0x10 != 0 { flag_list.push("ACK"); }
-                    if tcp.get_flags() & 0x04 != 0 { flag_list.push("RST"); }
-                    if tcp.get_flags() & 0x01 != 0 { flag_list.push("FIN"); }
-                    if tcp.get_flags() & 0x08 != 0 { flag_list.push("PSH"); }
+                    if tcp.get_flags() & 0x02 != 0 {
+                        flag_list.push("SYN");
+                    }
+                    if tcp.get_flags() & 0x10 != 0 {
+                        flag_list.push("ACK");
+                    }
+                    if tcp.get_flags() & 0x04 != 0 {
+                        flag_list.push("RST");
+                    }
+                    if tcp.get_flags() & 0x01 != 0 {
+                        flag_list.push("FIN");
+                    }
+                    if tcp.get_flags() & 0x08 != 0 {
+                        flag_list.push("PSH");
+                    }
                     flags = flag_list.join(",");
                 }
             }
@@ -213,4 +230,3 @@ impl PacketSource for LiveCapture {
         rx.recv().await
     }
 }
-

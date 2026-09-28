@@ -13,10 +13,25 @@ pub struct TelegramChannel {
     pub bot_token: String,
     pub chat_id: String,
     pub client: Client,
+    pub base_url: String,
 }
 
 impl TelegramChannel {
     pub fn new(name: String, bot_token: String, chat_id: String) -> Self {
+        Self::with_base_url(
+            name,
+            bot_token,
+            chat_id,
+            "https://api.telegram.org".to_string(),
+        )
+    }
+
+    pub fn with_base_url(
+        name: String,
+        bot_token: String,
+        chat_id: String,
+        base_url: String,
+    ) -> Self {
         Self {
             name,
             bot_token,
@@ -25,6 +40,7 @@ impl TelegramChannel {
                 .timeout(std::time::Duration::from_secs(5))
                 .build()
                 .unwrap_or_default(),
+            base_url,
         }
     }
 }
@@ -38,9 +54,16 @@ impl NotificationChannel for TelegramChannel {
         ChannelType::Telegram
     }
 
-    fn send<'a>(&'a self, alert: &'a Alert) -> Pin<Box<dyn Future<Output = Result<(), AppError>> + Send + 'a>> {
+    fn send<'a>(
+        &'a self,
+        alert: &'a Alert,
+    ) -> Pin<Box<dyn Future<Output = Result<(), AppError>> + Send + 'a>> {
         Box::pin(async move {
-            let url = format!("https://api.telegram.org/bot{}/sendMessage", self.bot_token);
+            let url = format!(
+                "{}/bot{}/sendMessage",
+                self.base_url.trim_end_matches('/'),
+                self.bot_token
+            );
             let text = format!(
                 "🚨 *[SecNet Security Alert]*\n\
                  *Severity:* `{:?}`\n\
@@ -63,7 +86,10 @@ impl NotificationChannel for TelegramChannel {
                 "parse_mode": "Markdown"
             });
 
-            info!("📱 [TELEGRAM ALERT] Dispatching to Telegram chat {}: {}", self.chat_id, alert.title);
+            info!(
+                "📱 [TELEGRAM ALERT] Dispatching to Telegram chat {}: {}",
+                self.chat_id, alert.title
+            );
 
             let response = self.client.post(&url).json(&payload).send().await;
 
@@ -73,12 +99,19 @@ impl NotificationChannel for TelegramChannel {
                     Ok(())
                 }
                 Ok(res) => {
-                    warn!("Telegram API responded with status {}: mock/fallback logging active", res.status());
-                    Ok(())
+                    let status = res.status();
+                    let body = res.text().await.unwrap_or_default();
+                    let msg = format!(
+                        "Telegram API responded with error status {}: {}",
+                        status, body
+                    );
+                    warn!("{}", msg);
+                    Err(AppError::Internal(msg))
                 }
                 Err(e) => {
-                    warn!("Telegram API request failed: {}", e);
-                    Ok(())
+                    let msg = format!("Telegram API request failed: {}", e);
+                    warn!("{}", msg);
+                    Err(AppError::Internal(msg))
                 }
             }
         })

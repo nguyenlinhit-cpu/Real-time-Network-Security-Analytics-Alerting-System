@@ -92,22 +92,51 @@ pub fn create_router(state: AppState) -> Router {
 
     // 2. Protected REST API routes
     let protected_routes = Router::new()
-        .route("/api/dashboard/summary", get(dashboard::get_dashboard_summary))
+        .route(
+            "/api/dashboard/summary",
+            get(dashboard::get_dashboard_summary),
+        )
         .route("/api/traffic", get(traffic::get_traffic))
         .route("/api/alerts", get(alerts::get_alerts))
-        .route("/api/alerts/:id", get(alerts::get_alert_by_id).patch(alerts::update_alert_status))
+        .route(
+            "/api/alerts/:id",
+            get(alerts::get_alert_by_id).patch(alerts::update_alert_status),
+        )
         .route("/api/rules", get(rules::get_rules).post(rules::create_rule))
-        .route("/api/rules/:id", get(rules::get_rule_by_id).patch(rules::update_rule).delete(rules::delete_rule))
+        .route(
+            "/api/rules/:id",
+            get(rules::get_rule_by_id)
+                .patch(rules::update_rule)
+                .delete(rules::delete_rule),
+        )
         .route("/api/devices", get(devices::get_devices))
         .route("/api/devices/:id/history", get(devices::get_device_history))
-        .route("/api/blocklist", get(blocklist::get_blocklist).post(blocklist::add_to_blocklist))
-        .route("/api/blocklist/:id", delete(blocklist::remove_from_blocklist))
+        .route(
+            "/api/blocklist",
+            get(blocklist::get_blocklist).post(blocklist::add_to_blocklist),
+        )
+        .route(
+            "/api/blocklist/:id",
+            delete(blocklist::remove_from_blocklist),
+        )
         .route("/api/reports/export", get(reports::export_reports))
-        .route("/api/notifications/channels", get(notifications::get_channels).post(notifications::create_channel))
-        .route("/api/notifications/channels/:id", patch(notifications::update_channel).delete(notifications::delete_channel))
-        .route("/api/notifications/test/:id", post(notifications::test_channel))
+        .route(
+            "/api/notifications/channels",
+            get(notifications::get_channels).post(notifications::create_channel),
+        )
+        .route(
+            "/api/notifications/channels/:id",
+            patch(notifications::update_channel).delete(notifications::delete_channel),
+        )
+        .route(
+            "/api/notifications/test/:id",
+            post(notifications::test_channel),
+        )
         .route("/api/auth/logout", post(auth::logout))
-        .layer(middleware::from_fn_with_state(state.clone(), auth_middleware));
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware,
+        ));
 
     // 3. WebSocket routes (real-time push)
     let ws_routes = Router::new()
@@ -117,19 +146,38 @@ pub fn create_router(state: AppState) -> Router {
     // 4. System & Observability routes
     let system_routes = Router::new()
         .route("/metrics", get(metrics::metrics_handler))
-        .route("/health", get(|| async { axum::Json(serde_json::json!({"status": "ok", "service": "secnet-backend"})) }))
-        .route("/api/health", get(|| async { axum::Json(serde_json::json!({"status": "ok", "service": "secnet-backend"})) }));
+        .route(
+            "/health",
+            get(|| async {
+                axum::Json(serde_json::json!({"status": "ok", "service": "secnet-backend"}))
+            }),
+        )
+        .route(
+            "/api/health",
+            get(|| async {
+                axum::Json(serde_json::json!({"status": "ok", "service": "secnet-backend"}))
+            }),
+        );
 
-    // 5. Configurable CORS whitelist
-    let cors = if let Ok(origins_str) = std::env::var("CORS_ALLOWED_ORIGINS") {
+    // 5. Configurable CORS whitelist (Mục 13)
+    let cors_env =
+        std::env::var("CORS_ALLOWED_ORIGINS").or_else(|_| std::env::var("CORS_ALLOWED_ORIGIN"));
+    let cors = if let Ok(origins_str) = cors_env {
         let origins: Vec<axum::http::HeaderValue> = origins_str
             .split(',')
             .filter_map(|s| s.trim().parse::<axum::http::HeaderValue>().ok())
             .collect();
-        CorsLayer::new()
-            .allow_origin(origins)
-            .allow_methods(Any)
-            .allow_headers(Any)
+        if origins.is_empty() {
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods(Any)
+                .allow_headers(Any)
+        } else {
+            CorsLayer::new()
+                .allow_origin(origins)
+                .allow_methods(Any)
+                .allow_headers(Any)
+        }
     } else {
         CorsLayer::new()
             .allow_origin(Any)
@@ -145,7 +193,10 @@ pub fn create_router(state: AppState) -> Router {
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
         .layer(middleware::from_fn(correlation_id_middleware))
         .layer(middleware::from_fn(security_headers_middleware))
-        .layer(middleware::from_fn_with_state(state.clone(), rate_limit_middleware))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            rate_limit_middleware,
+        ))
         .layer(cors)
         .with_state(state)
 }

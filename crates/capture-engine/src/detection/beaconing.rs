@@ -1,5 +1,7 @@
 use chrono::Utc;
-use common::models::{Alert, AlertSeverity, AlertStatus, DetectionRule as RuleModel, RuleType, TrafficEvent};
+use common::models::{
+    Alert, AlertSeverity, AlertStatus, DetectionRule as RuleModel, RuleType, TrafficEvent,
+};
 use ipnetwork::IpNetwork;
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
@@ -40,7 +42,9 @@ impl BeaconingDetector {
         // Calculate delta intervals between consecutive connections in seconds
         let mut intervals = Vec::with_capacity(timestamps.len() - 1);
         for i in 1..timestamps.len() {
-            let dt = timestamps[i].duration_since(timestamps[i - 1]).as_secs_f64();
+            let dt = timestamps[i]
+                .duration_since(timestamps[i - 1])
+                .as_secs_f64();
             if dt >= 0.01 {
                 intervals.push(dt);
             }
@@ -58,7 +62,11 @@ impl BeaconingDetector {
             return None;
         }
 
-        let variance: f64 = intervals.iter().map(|&x| (x - mean_interval).powi(2)).sum::<f64>() / count;
+        let variance: f64 = intervals
+            .iter()
+            .map(|&x| (x - mean_interval).powi(2))
+            .sum::<f64>()
+            / count;
         let std_dev = variance.sqrt();
         let cv = std_dev / mean_interval; // Coefficient of Variation (jitter ratio)
 
@@ -118,7 +126,10 @@ impl DetectionRule for BeaconingDetector {
             timestamps.push_back(now);
         }
 
-        let beacon_analysis = self.history.get(&key).and_then(|ts| self.check_beaconing(ts));
+        let beacon_analysis = self
+            .history
+            .get(&key)
+            .and_then(|ts| self.check_beaconing(ts));
 
         if let Some((interval, cv)) = beacon_analysis {
             if let Some(last_alert) = self.last_alert_time.get(&key) {

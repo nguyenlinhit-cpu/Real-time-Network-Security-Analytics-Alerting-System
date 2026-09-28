@@ -13,7 +13,6 @@ use crate::{
     state::AppState,
 };
 
-
 #[utoipa::path(
     post,
     path = "/api/auth/register",
@@ -28,7 +27,9 @@ pub async fn register(
     State(state): State<AppState>,
     Json(payload): Json<CreateUserDto>,
 ) -> Result<Json<ApiResponse<AuthResponseDto>>, AppError> {
-    payload.validate().map_err(|e| AppError::ValidationError(e.to_string()))?;
+    payload
+        .validate()
+        .map_err(|e| AppError::ValidationError(e.to_string()))?;
 
     let hashed_password = hash_password(&payload.password)?;
     // Public self-registration ALWAYS defaults to Viewer to prevent privilege escalation (Mục 9)
@@ -64,7 +65,8 @@ pub async fn register(
     .execute(&state.pool)
     .await;
 
-    let (token, refresh_token) = generate_tokens(&user, &state.jwt_secret, state.jwt_expiration_hours)?;
+    let (token, refresh_token) =
+        generate_tokens(&user, &state.jwt_secret, state.jwt_expiration_hours)?;
 
     Ok(Json(ApiResponse::ok(AuthResponseDto {
         token,
@@ -88,7 +90,9 @@ pub async fn login(
     State(state): State<AppState>,
     Json(payload): Json<LoginDto>,
 ) -> Result<Json<ApiResponse<AuthResponseDto>>, AppError> {
-    payload.validate().map_err(|e| AppError::ValidationError(e.to_string()))?;
+    payload
+        .validate()
+        .map_err(|e| AppError::ValidationError(e.to_string()))?;
 
     let lockout_window_secs = 900u64; // 15 minutes lockout
     let max_failed_attempts = 5i64;
@@ -105,7 +109,9 @@ pub async fn login(
         }
     } else if let Some(entry) = state.failed_logins.get(&payload.username) {
         let (attempts, last_time) = *entry;
-        if attempts >= 5 && now.duration_since(last_time) < std::time::Duration::from_secs(lockout_window_secs) {
+        if attempts >= 5
+            && now.duration_since(last_time) < std::time::Duration::from_secs(lockout_window_secs)
+        {
             is_locked_out = true;
         }
     }
@@ -146,11 +152,18 @@ pub async fn login(
 
             // Track failed attempt in Redis & DashMap
             if let Some(ref redis) = state.redis {
-                let _ = redis.incr_with_expire(&lockout_key, lockout_window_secs).await;
+                let _ = redis
+                    .incr_with_expire(&lockout_key, lockout_window_secs)
+                    .await;
             } else {
-                let mut entry = state.failed_logins.entry(payload.username.clone()).or_insert((0, now));
+                let mut entry = state
+                    .failed_logins
+                    .entry(payload.username.clone())
+                    .or_insert((0, now));
                 let (count, last_time) = entry.value_mut();
-                if now.duration_since(*last_time) > std::time::Duration::from_secs(lockout_window_secs) {
+                if now.duration_since(*last_time)
+                    > std::time::Duration::from_secs(lockout_window_secs)
+                {
                     *count = 1;
                 } else {
                     *count += 1;
@@ -166,7 +179,9 @@ pub async fn login(
             .execute(&state.pool)
             .await;
 
-            return Err(AppError::Unauthorized("Invalid username or password".to_string()));
+            return Err(AppError::Unauthorized(
+                "Invalid username or password".to_string(),
+            ));
         }
     };
 
@@ -174,11 +189,17 @@ pub async fn login(
     if !is_valid {
         // Track failed attempt in Redis & DashMap
         if let Some(ref redis) = state.redis {
-            let _ = redis.incr_with_expire(&lockout_key, lockout_window_secs).await;
+            let _ = redis
+                .incr_with_expire(&lockout_key, lockout_window_secs)
+                .await;
         } else {
-            let mut entry = state.failed_logins.entry(payload.username.clone()).or_insert((0, now));
+            let mut entry = state
+                .failed_logins
+                .entry(payload.username.clone())
+                .or_insert((0, now));
             let (count, last_time) = entry.value_mut();
-            if now.duration_since(*last_time) > std::time::Duration::from_secs(lockout_window_secs) {
+            if now.duration_since(*last_time) > std::time::Duration::from_secs(lockout_window_secs)
+            {
                 *count = 1;
             } else {
                 *count += 1;
@@ -195,7 +216,9 @@ pub async fn login(
         .execute(&state.pool)
         .await;
 
-        return Err(AppError::Unauthorized("Invalid username or password".to_string()));
+        return Err(AppError::Unauthorized(
+            "Invalid username or password".to_string(),
+        ));
     }
 
     // Success: reset failed logins counter in Redis and in-memory
@@ -214,7 +237,8 @@ pub async fn login(
     .execute(&state.pool)
     .await;
 
-    let (token, refresh_token) = generate_tokens(&user, &state.jwt_secret, state.jwt_expiration_hours)?;
+    let (token, refresh_token) =
+        generate_tokens(&user, &state.jwt_secret, state.jwt_expiration_hours)?;
 
     Ok(Json(ApiResponse::ok(AuthResponseDto {
         token,
@@ -254,7 +278,9 @@ pub async fn refresh_token(
     // Check if refresh token has been revoked
     if let Some(jti) = claims.jti {
         if state.is_token_revoked(jti).await {
-            return Err(AppError::Unauthorized("Refresh token has been revoked".to_string()));
+            return Err(AppError::Unauthorized(
+                "Refresh token has been revoked".to_string(),
+            ));
         }
         // Rotate: revoke old refresh token so it cannot be re-used
         state.revoke_token(jti, 7 * 24 * 3600).await;
@@ -268,7 +294,8 @@ pub async fn refresh_token(
     .await?
     .ok_or_else(|| AppError::Unauthorized("User not found".to_string()))?;
 
-    let (token, refresh_token) = generate_tokens(&user, &state.jwt_secret, state.jwt_expiration_hours)?;
+    let (token, refresh_token) =
+        generate_tokens(&user, &state.jwt_secret, state.jwt_expiration_hours)?;
 
     Ok(Json(ApiResponse::ok(AuthResponseDto {
         token,
@@ -329,4 +356,3 @@ pub async fn logout(
 
     Ok(Json(ApiResponse::ok("Logged out successfully".to_string())))
 }
-

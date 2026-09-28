@@ -4,7 +4,8 @@ use leptos::prelude::*;
 use crate::components::icons::{IconAlert, IconBell, IconClose};
 
 fn play_critical_sound() {
-    let _ = js_sys::eval(r#"
+    let _ = js_sys::eval(
+        r#"
         try {
             const ctx = new (window.AudioContext || window.webkitAudioContext)();
             const osc = ctx.createOscillator();
@@ -19,7 +20,8 @@ fn play_critical_sound() {
             osc.start();
             osc.stop(ctx.currentTime + 0.35);
         } catch(e) {}
-    "#);
+    "#,
+    );
 }
 
 #[component]

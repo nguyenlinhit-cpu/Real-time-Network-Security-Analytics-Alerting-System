@@ -1,4 +1,5 @@
 use common::models::{Alert, TrafficEvent};
+use futures::StreamExt;
 use gloo_timers::future::TimeoutFuture;
 use leptos::prelude::*;
 use wasm_bindgen::prelude::*;
@@ -31,13 +32,20 @@ pub fn init_alerts_websocket(
                     continue;
                 }
             };
-            let host = window.location().host().unwrap_or_else(|_| "localhost:8080".to_string());
-            let ws_protocol = if window.location().protocol().unwrap_or_default() == "https:" { "wss:" } else { "ws:" };
+            let host = window
+                .location()
+                .host()
+                .unwrap_or_else(|_| "localhost:8080".to_string());
+            let ws_protocol = if window.location().protocol().unwrap_or_default() == "https:" {
+                "wss:"
+            } else {
+                "ws:"
+            };
             let token_q = get_token_query();
             let ws_url = format!("{}//{}/ws/alerts{}", ws_protocol, host, token_q);
 
-            let (close_tx, mut close_rx) = tokio::sync::mpsc::channel::<()>(2);
-            let close_tx_err = close_tx.clone();
+            let (mut close_tx, mut close_rx) = futures::channel::mpsc::channel::<()>(2);
+            let mut close_tx_err = close_tx.clone();
 
             if let Ok(ws) = WebSocket::new(&ws_url) {
                 let onopen_callback = Closure::<dyn FnMut()>::new(move || {
@@ -46,19 +54,20 @@ pub fn init_alerts_websocket(
                 ws.set_onopen(Some(onopen_callback.as_ref().unchecked_ref()));
                 onopen_callback.forget();
 
-                let onmessage_callback = Closure::<dyn FnMut(MessageEvent)>::new(move |e: MessageEvent| {
-                    if let Some(txt) = e.data().as_string() {
-                        if let Ok(alert) = serde_json::from_str::<Alert>(&txt) {
-                            latest_alert.set(Some(alert.clone()));
-                            alerts_signal.update(|list| {
-                                list.insert(0, alert);
-                                if list.len() > 100 {
-                                    list.pop();
-                                }
-                            });
+                let onmessage_callback =
+                    Closure::<dyn FnMut(MessageEvent)>::new(move |e: MessageEvent| {
+                        if let Some(txt) = e.data().as_string() {
+                            if let Ok(alert) = serde_json::from_str::<Alert>(&txt) {
+                                latest_alert.set(Some(alert.clone()));
+                                alerts_signal.update(|list| {
+                                    list.insert(0, alert);
+                                    if list.len() > 100 {
+                                        list.pop();
+                                    }
+                                });
+                            }
                         }
-                    }
-                });
+                    });
                 ws.set_onmessage(Some(onmessage_callback.as_ref().unchecked_ref()));
                 onmessage_callback.forget();
 
@@ -77,7 +86,7 @@ pub fn init_alerts_websocket(
                 onerror_callback.forget();
 
                 // Wait until the connection is actually closed before attempting to reconnect (Mục 7)
-                let _ = close_rx.recv().await;
+                let _ = close_rx.next().await;
                 backoff_ms = (backoff_ms * 2).min(30000);
             } else {
                 is_connected.set(false);
@@ -103,13 +112,20 @@ pub fn init_traffic_websocket(
                     continue;
                 }
             };
-            let host = window.location().host().unwrap_or_else(|_| "localhost:8080".to_string());
-            let ws_protocol = if window.location().protocol().unwrap_or_default() == "https:" { "wss:" } else { "ws:" };
+            let host = window
+                .location()
+                .host()
+                .unwrap_or_else(|_| "localhost:8080".to_string());
+            let ws_protocol = if window.location().protocol().unwrap_or_default() == "https:" {
+                "wss:"
+            } else {
+                "ws:"
+            };
             let token_q = get_token_query();
             let ws_url = format!("{}//{}/ws/traffic{}", ws_protocol, host, token_q);
 
-            let (close_tx, mut close_rx) = tokio::sync::mpsc::channel::<()>(2);
-            let close_tx_err = close_tx.clone();
+            let (mut close_tx, mut close_rx) = futures::channel::mpsc::channel::<()>(2);
+            let mut close_tx_err = close_tx.clone();
 
             if let Ok(ws) = WebSocket::new(&ws_url) {
                 let onmessage = Closure::<dyn FnMut(MessageEvent)>::new(move |e: MessageEvent| {
@@ -140,7 +156,7 @@ pub fn init_traffic_websocket(
                 ws.set_onerror(Some(onerror_callback.as_ref().unchecked_ref()));
                 onerror_callback.forget();
 
-                let _ = close_rx.recv().await;
+                let _ = close_rx.next().await;
                 backoff_ms = (backoff_ms * 2).min(30000);
             } else {
                 backoff_ms = (backoff_ms * 2).min(30000);

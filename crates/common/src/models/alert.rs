@@ -4,46 +4,41 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use validator::Validate;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 #[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
-#[cfg_attr(feature = "sqlx", sqlx(type_name = "alert_severity", rename_all = "lowercase"))]
+#[cfg_attr(
+    feature = "sqlx",
+    sqlx(type_name = "alert_severity", rename_all = "lowercase")
+)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub enum AlertSeverity {
     Low,
+    #[default]
     Medium,
     High,
     Critical,
 }
 
-impl Default for AlertSeverity {
-    fn default() -> Self {
-        Self::Medium
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 #[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
-#[cfg_attr(feature = "sqlx", sqlx(type_name = "alert_status", rename_all = "lowercase"))]
+#[cfg_attr(
+    feature = "sqlx",
+    sqlx(type_name = "alert_status", rename_all = "lowercase")
+)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub enum AlertStatus {
+    #[default]
     Open,
     Acknowledged,
     Resolved,
-}
-
-impl Default for AlertStatus {
-    fn default() -> Self {
-        Self::Open
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "sqlx", derive(sqlx::FromRow))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct Alert {
-
     pub id: Uuid,
     pub rule_id: Option<Uuid>,
     pub severity: AlertSeverity,

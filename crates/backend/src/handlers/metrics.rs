@@ -41,10 +41,11 @@ pub async fn metrics_handler(State(state): State<AppState>) -> Response {
         .await
         .unwrap_or(0);
 
-    let critical_alerts: i64 = sqlx::query_scalar("SELECT count(*) FROM alerts WHERE severity = 'critical'")
-        .fetch_one(&state.pool)
-        .await
-        .unwrap_or(0);
+    let critical_alerts: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM alerts WHERE severity = 'critical'")
+            .fetch_one(&state.pool)
+            .await
+            .unwrap_or(0);
 
     let blocked_ips: i64 = sqlx::query_scalar("SELECT count(*) FROM blocked_ips")
         .fetch_one(&state.pool)
@@ -93,7 +94,10 @@ pub async fn metrics_handler(State(state): State<AppState>) -> Response {
 
     (
         StatusCode::OK,
-        [(header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+        [(
+            header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
         output,
     )
         .into_response()

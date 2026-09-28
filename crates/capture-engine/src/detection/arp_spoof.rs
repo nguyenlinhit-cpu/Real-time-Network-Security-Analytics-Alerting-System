@@ -1,5 +1,7 @@
 use chrono::Utc;
-use common::models::{Alert, AlertSeverity, AlertStatus, DetectionRule as RuleModel, RuleType, TrafficEvent};
+use common::models::{
+    Alert, AlertSeverity, AlertStatus, DetectionRule as RuleModel, RuleType, TrafficEvent,
+};
 use ipnetwork::IpNetwork;
 use std::collections::HashMap;
 use std::time::Instant;
@@ -23,6 +25,12 @@ impl ArpSpoofDetector {
             ip_to_mac: HashMap::new(),
             last_alert_time: HashMap::new(),
         }
+    }
+}
+
+impl Default for ArpSpoofDetector {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -55,13 +63,10 @@ impl DetectionRule for ArpSpoofDetector {
 
         // Check if event carries MAC address information (e.g. in flags "MAC:xx:xx:xx:xx:xx:xx")
         let mac_prefix = "MAC:";
-        let mac = if let Some(idx) = event.flags.find(mac_prefix) {
-            let start = idx + mac_prefix.len();
-            let slice = &event.flags[start..];
-            slice.split(',').next().unwrap_or(slice).to_lowercase()
-        } else {
-            return None;
-        };
+        let idx = event.flags.find(mac_prefix)?;
+        let start = idx + mac_prefix.len();
+        let slice = &event.flags[start..];
+        let mac = slice.split(',').next().unwrap_or(slice).to_lowercase();
 
         let target_ip = event.dst_ip;
 
@@ -121,4 +126,3 @@ impl DetectionRule for ArpSpoofDetector {
         }
     }
 }
-

@@ -33,7 +33,9 @@ impl AlertThrottler {
         if let Some(ref r) = self.redis {
             let key = format!(
                 "secnet:throttle:{}:{}",
-                rule_id.map(|u| u.to_string()).unwrap_or_else(|| "none".to_string()),
+                rule_id
+                    .map(|u| u.to_string())
+                    .unwrap_or_else(|| "none".to_string()),
                 src_ip
             );
             match r.set_nx_ex(&key, "1", self.window.as_secs()).await {
@@ -43,7 +45,10 @@ impl AlertThrottler {
                     return !acquired;
                 }
                 Err(e) => {
-                    tracing::warn!("Redis throttle check failed, falling back to local memory: {}", e);
+                    tracing::warn!(
+                        "Redis throttle check failed, falling back to local memory: {}",
+                        e
+                    );
                 }
             }
         }
@@ -68,4 +73,3 @@ impl AlertThrottler {
         }
     }
 }
-

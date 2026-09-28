@@ -92,7 +92,11 @@ impl TrafficSimulator {
             protocol,
             bytes_transferred,
             packet_count: 1,
-            flags: if dst_port == 443 || dst_port == 80 { "ACK".to_string() } else { "".to_string() },
+            flags: if dst_port == 443 || dst_port == 80 {
+                "ACK".to_string()
+            } else {
+                "".to_string()
+            },
             interface_name: self.interface_name.clone(),
         }
     }
@@ -105,7 +109,11 @@ impl PacketSource for TrafficSimulator {
         let scenario = self.current_scenario.clone();
         match scenario {
             AttackScenario::None => Some(self.generate_normal_event()),
-            AttackScenario::PortScan { target_ip, start_port, port_count } => {
+            AttackScenario::PortScan {
+                target_ip,
+                start_port,
+                port_count,
+            } => {
                 let attacker_ip: IpNetwork = "10.0.0.99/32".parse().unwrap();
                 let port = start_port + (self.scenario_step as u16 % port_count);
                 self.scenario_step += 1;
@@ -124,7 +132,10 @@ impl PacketSource for TrafficSimulator {
                     interface_name: self.interface_name.clone(),
                 })
             }
-            AttackScenario::SynFlood { target_ip, packet_count } => {
+            AttackScenario::SynFlood {
+                target_ip,
+                packet_count,
+            } => {
                 let attacker_ip: IpNetwork = "198.51.100.77/32".parse().unwrap();
                 self.scenario_step += 1;
                 if self.scenario_step > packet_count {
@@ -145,7 +156,11 @@ impl PacketSource for TrafficSimulator {
                     interface_name: self.interface_name.clone(),
                 })
             }
-            AttackScenario::BruteForce { target_ip, port, attempts } => {
+            AttackScenario::BruteForce {
+                target_ip,
+                port,
+                attempts,
+            } => {
                 let attacker_ip: IpNetwork = "203.0.113.45/32".parse().unwrap();
                 self.scenario_step += 1;
                 if self.scenario_step > attempts {
@@ -166,7 +181,10 @@ impl PacketSource for TrafficSimulator {
                     interface_name: self.interface_name.clone(),
                 })
             }
-            AttackScenario::ArpSpoof { target_ip, fake_mac } => {
+            AttackScenario::ArpSpoof {
+                target_ip,
+                fake_mac,
+            } => {
                 let attacker_ip: IpNetwork = "192.168.1.200/32".parse().unwrap();
                 self.scenario_step += 1;
 
@@ -192,7 +210,9 @@ impl PacketSource for TrafficSimulator {
                     self.current_scenario = AttackScenario::None;
                 }
 
-                let random_hex: String = (0..32).map(|_| format!("{:x}", rng.gen_range(0..16))).collect();
+                let random_hex: String = (0..32)
+                    .map(|_| format!("{:x}", rng.gen_range(0..16)))
+                    .collect();
                 let fake_domain = format!("{}.c2.tunnel-exfil.net", random_hex);
 
                 Some(TrafficEvent {

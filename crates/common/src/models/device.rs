@@ -8,7 +8,6 @@ use validator::Validate;
 #[cfg_attr(feature = "sqlx", derive(sqlx::FromRow))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct Device {
-
     pub id: Uuid,
     #[cfg_attr(feature = "utoipa", schema(value_type = String, example = "192.168.1.1/32"))]
     pub ip_address: IpNetwork,

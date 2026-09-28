@@ -51,7 +51,10 @@ pub fn RulesPage() -> impl IntoView {
                         list[pos] = updated;
                     }
                 });
-                set_status_msg.set(Some(format!("Rule successfully {}", if new_state { "enabled" } else { "disabled" })));
+                set_status_msg.set(Some(format!(
+                    "Rule successfully {}",
+                    if new_state { "enabled" } else { "disabled" }
+                )));
             }
         });
     };

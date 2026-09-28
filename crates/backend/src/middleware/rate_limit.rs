@@ -26,7 +26,11 @@ pub async fn rate_limit_middleware(
     let max_requests = if is_auth_sensitive { 10 } else { 200 };
     let window = Duration::from_secs(60);
 
-    let key = format!("ratelimit:{}:{}", client_ip, if is_auth_sensitive { "auth" } else { "api" });
+    let key = format!(
+        "ratelimit:{}:{}",
+        client_ip,
+        if is_auth_sensitive { "auth" } else { "api" }
+    );
 
     // 1. Distributed rate limiting via Redis if available
     let mut handled_by_redis = false;
@@ -39,7 +43,10 @@ pub async fn rate_limit_middleware(
                 }
             }
             Err(e) => {
-                tracing::warn!("Redis rate limiter failed, falling back to local memory: {}", e);
+                tracing::warn!(
+                    "Redis rate limiter failed, falling back to local memory: {}",
+                    e
+                );
             }
         }
     }

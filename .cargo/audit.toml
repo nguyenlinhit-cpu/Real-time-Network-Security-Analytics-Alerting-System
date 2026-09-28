@@ -1,0 +1,5 @@
+[advisories]
+ignore = [
+    # RUSTSEC-2023-0071: Marvin attack in rsa crate via unused sqlx-mysql dependency
+    "RUSTSEC-2023-0071",
+]

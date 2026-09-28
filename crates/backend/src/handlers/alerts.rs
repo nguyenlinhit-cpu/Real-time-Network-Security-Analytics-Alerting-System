@@ -32,7 +32,7 @@ pub async fn get_alerts(
         FROM alerts
         ORDER BY detected_at DESC
         LIMIT 100
-        "#
+        "#,
     )
     .fetch_all(&state.pool)
     .await?;
@@ -64,7 +64,7 @@ pub async fn get_alert_by_id(
             detected_at, status, acknowledged_by, resolved_at
         FROM alerts
         WHERE id = $1
-        "#
+        "#,
     )
     .bind(id)
     .fetch_optional(&state.pool)
@@ -128,7 +128,7 @@ pub async fn update_alert_status(
         RETURNING 
             id, rule_id, severity, title, description, src_ip, dst_ip,
             detected_at, status, acknowledged_by, resolved_at
-        "#
+        "#,
     )
     .bind(payload.status)
     .bind(current_user.0.sub)

@@ -33,7 +33,10 @@ fn test_rate_limiter_in_memory_sliding_window() {
         let mut entry = rate_limiter.entry(key.clone()).or_insert((now, 0));
         let (_, count) = entry.value_mut();
         *count += 1;
-        assert!(*count > max_requests, "11th request must trigger rate limit exceed");
+        assert!(
+            *count > max_requests,
+            "11th request must trigger rate limit exceed"
+        );
     }
 
     // 3. Different endpoint category (API) should have independent counter
@@ -42,6 +45,9 @@ fn test_rate_limiter_in_memory_sliding_window() {
         let mut entry = rate_limiter.entry(api_key.clone()).or_insert((now, 0));
         let (_, count) = entry.value_mut();
         *count = 1;
-        assert_eq!(*count, 1, "API endpoint counter must be separate from auth counter");
+        assert_eq!(
+            *count, 1,
+            "API endpoint counter must be separate from auth counter"
+        );
     }
 }
