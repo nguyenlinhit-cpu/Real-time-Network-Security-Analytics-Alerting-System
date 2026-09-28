@@ -4,6 +4,7 @@ pub mod auth;
 pub mod blocklist;
 pub mod dashboard;
 pub mod devices;
+pub mod filters;
 pub mod metrics;
 pub mod notifications;
 pub mod reports;

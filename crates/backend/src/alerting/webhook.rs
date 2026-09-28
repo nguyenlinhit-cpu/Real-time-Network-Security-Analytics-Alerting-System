@@ -1,7 +1,7 @@
 use common::models::{Alert, ChannelType};
 use reqwest::Client;
 use std::future::Future;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use tracing::{error, info, warn};
 
@@ -69,6 +69,19 @@ pub async fn validate_webhook_url_ext(
     require_https: bool,
     allow_private: bool,
 ) -> Result<reqwest::Url, AppError> {
+    validate_and_resolve(url_str, require_https, allow_private)
+        .await
+        .map(|(url, _)| url)
+}
+
+/// Validates the URL and returns the vetted address its host resolved to. Callers must send the
+/// request to exactly that address (see `pinned_client`) so a second DNS lookup cannot swap in a
+/// private IP after validation (DNS rebinding).
+pub async fn validate_and_resolve(
+    url_str: &str,
+    require_https: bool,
+    allow_private: bool,
+) -> Result<(reqwest::Url, Option<SocketAddr>), AppError> {
     let parsed = reqwest::Url::parse(url_str)
         .map_err(|e| AppError::BadRequest(format!("Invalid webhook URL format: {}", e)))?;
 
@@ -91,6 +104,7 @@ pub async fn validate_webhook_url_ext(
         .host_str()
         .ok_or_else(|| AppError::BadRequest("Webhook URL must contain a valid host".to_string()))?;
 
+    let mut pinned: Option<SocketAddr> = None;
     if !allow_private {
         // Block localhost literal strings and internal suffixes
         let lower_host = host_str.to_lowercase();
@@ -130,6 +144,7 @@ pub async fn validate_webhook_url_ext(
             let mut found = false;
             for addr in addrs {
                 found = true;
+                pinned.get_or_insert(addr);
                 let ip = addr.ip();
                 if is_private_or_restricted_ip(ip) {
                     return Err(AppError::BadRequest(format!(
@@ -148,7 +163,19 @@ pub async fn validate_webhook_url_ext(
         }
     }
 
-    Ok(parsed)
+    Ok((parsed, pinned))
+}
+
+/// HTTP client for outbound alert delivery: short timeout, no redirects (redirect-based SSRF)
+/// and, when given, the host pinned to the address vetted by `validate_and_resolve`.
+pub fn pinned_client(url: &reqwest::Url, pinned: Option<SocketAddr>) -> Client {
+    let mut builder = Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .redirect(reqwest::redirect::Policy::none());
+    if let (Some(addr), Some(host)) = (pinned, url.host_str()) {
+        builder = builder.resolve(host, addr);
+    }
+    builder.build().unwrap_or_default()
 }
 
 pub struct WebhookChannel {
@@ -202,28 +229,28 @@ impl NotificationChannel for WebhookChannel {
         alert: &'a Alert,
     ) -> Pin<Box<dyn Future<Output = Result<(), AppError>> + Send + 'a>> {
         Box::pin(async move {
-            // Validate URL against SSRF before firing request
-            if let Err(e) = validate_webhook_url_ext(
+            // Validate URL against SSRF before firing request, then pin the vetted address.
+            let (url, pinned) = match validate_and_resolve(
                 &self.endpoint_url,
                 self.require_https,
                 self.allow_private_ips,
             )
             .await
             {
-                error!(
-                    "🚨 [SSRF BLOCKED] Webhook delivery aborted for {}: {}",
-                    self.endpoint_url, e
-                );
-                return Err(e);
-            }
+                Ok(v) => v,
+                Err(e) => {
+                    error!("🚨 [SSRF BLOCKED] Webhook delivery aborted: {}", e);
+                    return Err(e);
+                }
+            };
+            let host = url.host_str().unwrap_or("?").to_string();
 
             info!(
                 "🔗 [WEBHOOK ALERT] Posting incident to {}: {}",
-                self.endpoint_url, alert.title
+                host, alert.title
             );
 
-            let response = self
-                .client
+            let response = pinned_client(&url, pinned)
                 .post(&self.endpoint_url)
                 .json(alert)
                 .send()
@@ -231,12 +258,12 @@ impl NotificationChannel for WebhookChannel {
 
             match response {
                 Ok(res) if res.status().is_success() => {
-                    info!("Webhook delivered successfully to {}", self.endpoint_url);
+                    info!("Webhook delivered successfully to {}", host);
                     Ok(())
                 }
                 Ok(res) => {
                     let status = res.status();
-                    let body = res.text().await.unwrap_or_default();
+                    let body: String = res.text().await.unwrap_or_default().chars().take(300).collect();
                     let msg = format!(
                         "Webhook responded with non-2xx status code {}: {}",
                         status, body
@@ -245,7 +272,7 @@ impl NotificationChannel for WebhookChannel {
                     Err(AppError::Internal(msg))
                 }
                 Err(e) => {
-                    let msg = format!("Webhook delivery failed: {}", e);
+                    let msg = format!("Webhook delivery failed: {}", e.without_url());
                     warn!("{}", msg);
                     Err(AppError::Internal(msg))
                 }

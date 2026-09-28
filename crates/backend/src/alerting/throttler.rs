@@ -1,23 +1,29 @@
 use crate::redis_client::SimpleRedisClient;
-use dashmap::DashMap;
+use common::models::Alert;
+use dashmap::{mapref::entry::Entry, DashMap};
 use ipnetwork::IpNetwork;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 pub struct AlertThrottler {
-    cache: DashMap<(Option<Uuid>, IpNetwork), Instant>,
+    cache: DashMap<String, Instant>,
     window: Duration,
     redis: Option<Arc<SimpleRedisClient>>,
 }
 
+/// Deduplication key. Alerts without a rule id (rule deleted or custom) fall back to the alert
+/// title, so different detectors firing for the same source IP are not merged together.
+fn dedup_key(rule_id: Option<Uuid>, kind: &str, src_ip: IpNetwork) -> String {
+    match rule_id {
+        Some(id) => format!("{}:{}", id, src_ip),
+        None => format!("title={}:{}", kind, src_ip),
+    }
+}
+
 impl AlertThrottler {
     pub fn new(window_seconds: u64) -> Self {
-        Self {
-            cache: DashMap::new(),
-            window: Duration::from_secs(window_seconds),
-            redis: None,
-        }
+        Self::with_redis(window_seconds, None)
     }
 
     pub fn with_redis(window_seconds: u64, redis: Option<Arc<SimpleRedisClient>>) -> Self {
@@ -29,21 +35,15 @@ impl AlertThrottler {
     }
 
     /// Returns true if this alert should be suppressed due to recent duplicate sending (distributed via Redis if available)
-    pub async fn should_throttle_async(&self, rule_id: Option<Uuid>, src_ip: IpNetwork) -> bool {
+    pub async fn should_throttle_alert(&self, alert: &Alert) -> bool {
+        let key = dedup_key(alert.rule_id, &alert.title, alert.src_ip);
         if let Some(ref r) = self.redis {
-            let key = format!(
-                "secnet:throttle:{}:{}",
-                rule_id
-                    .map(|u| u.to_string())
-                    .unwrap_or_else(|| "none".to_string()),
-                src_ip
-            );
-            match r.set_nx_ex(&key, "1", self.window.as_secs()).await {
-                Ok(acquired) => {
-                    // If acquired is true, key was freshly created -> do NOT throttle (return false)
-                    // If acquired is false, key already existed -> throttle (return true)
-                    return !acquired;
-                }
+            match r
+                .set_nx_ex(&format!("secnet:throttle:{}", key), "1", self.window.as_secs())
+                .await
+            {
+                // Key freshly created -> first occurrence -> do not throttle.
+                Ok(acquired) => return !acquired,
                 Err(e) => {
                     tracing::warn!(
                         "Redis throttle check failed, falling back to local memory: {}",
@@ -53,23 +53,36 @@ impl AlertThrottler {
             }
         }
 
-        self.should_throttle(rule_id, src_ip)
+        self.check_local(key)
     }
 
-    /// In-memory suppression check
+    /// In-memory suppression check for a rule/source pair.
     pub fn should_throttle(&self, rule_id: Option<Uuid>, src_ip: IpNetwork) -> bool {
-        let key = (rule_id, src_ip);
-        let now = Instant::now();
+        self.check_local(dedup_key(rule_id, "", src_ip))
+    }
 
-        if let Some(mut last_seen) = self.cache.get_mut(&key) {
-            if now.duration_since(*last_seen) < self.window {
-                return true;
+    fn check_local(&self, key: String) -> bool {
+        let now = Instant::now();
+        match self.cache.entry(key) {
+            Entry::Occupied(mut e) => {
+                if now.duration_since(*e.get()) < self.window {
+                    true
+                } else {
+                    e.insert(now);
+                    false
+                }
             }
-            *last_seen = now;
-            false
-        } else {
-            self.cache.insert(key, now);
-            false
+            Entry::Vacant(e) => {
+                e.insert(now);
+                false
+            }
         }
+    }
+
+    /// Removes entries older than the dedup window so the cache cannot grow unbounded.
+    pub fn cleanup(&self) {
+        let now = Instant::now();
+        self.cache
+            .retain(|_, last| now.duration_since(*last) < self.window);
     }
 }

@@ -5,7 +5,7 @@ use axum::{
 use common::models::{TrafficEvent, TrafficQueryFilter};
 use common::ApiResponse;
 
-use crate::{error::AppError, state::AppState};
+use crate::{error::AppError, handlers::filters::parse_ip_filter, state::AppState};
 
 #[utoipa::path(
     get,
@@ -31,14 +31,14 @@ pub async fn get_traffic(
 ) -> Result<Json<ApiResponse<Vec<TrafficEvent>>>, AppError> {
     let limit = filter.limit.unwrap_or(50).clamp(1, 500);
     let offset = filter.offset.unwrap_or(0).max(0);
-    let src_ip_parsed = filter
-        .src_ip
+    let src_ip_parsed = parse_ip_filter("src_ip", filter.src_ip.as_deref())?;
+    let dst_ip_parsed = parse_ip_filter("dst_ip", filter.dst_ip.as_deref())?;
+    let protocol = filter
+        .protocol
         .as_deref()
-        .and_then(|s| s.parse::<ipnetwork::IpNetwork>().ok());
-    let dst_ip_parsed = filter
-        .dst_ip
-        .as_deref()
-        .and_then(|s| s.parse::<ipnetwork::IpNetwork>().ok());
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_uppercase);
 
     let events = sqlx::query_as::<_, TrafficEvent>(
         r#"
@@ -50,7 +50,7 @@ pub async fn get_traffic(
           AND ($2::TIMESTAMPTZ IS NULL OR time <= $2)
           AND ($3::INET IS NULL OR src_ip = $3)
           AND ($4::INET IS NULL OR dst_ip = $4)
-          AND ($5::TEXT IS NULL OR protocol = $5)
+          AND ($5::TEXT IS NULL OR upper(protocol) = $5)
         ORDER BY time DESC
         LIMIT $6 OFFSET $7
         "#,
@@ -59,7 +59,7 @@ pub async fn get_traffic(
     .bind(filter.to)
     .bind(src_ip_parsed)
     .bind(dst_ip_parsed)
-    .bind(filter.protocol)
+    .bind(protocol)
     .bind(limit)
     .bind(offset)
     .fetch_all(&state.pool)
