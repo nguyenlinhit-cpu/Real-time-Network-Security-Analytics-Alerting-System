@@ -17,7 +17,11 @@ fn build_channel(ch: &ChannelModel) -> Box<dyn NotificationChannel> {
                 .as_str()
                 .unwrap_or("localhost")
                 .to_string();
-            let port = ch.config_json["smtp_port"].as_u64().unwrap_or(587) as u16;
+            let port = ch.config_json["smtp_port"]
+                .as_u64()
+                .or_else(|| ch.config_json["smtp_port"].as_str().and_then(|s| s.parse().ok()))
+                .and_then(|p| u16::try_from(p).ok())
+                .unwrap_or(587);
             let to = ch.config_json["to_email"]
                 .as_str()
                 .unwrap_or("alerts@secnet.local")
@@ -25,6 +29,7 @@ fn build_channel(ch: &ChannelModel) -> Box<dyn NotificationChannel> {
             let username = ch.config_json["smtp_username"]
                 .as_str()
                 .or_else(|| ch.config_json["username"].as_str())
+                .filter(|s| !s.trim().is_empty())
                 .map(|s| s.to_string());
             let password = ch.config_json["smtp_password"]
                 .as_str()
@@ -42,12 +47,16 @@ fn build_channel(ch: &ChannelModel) -> Box<dyn NotificationChannel> {
                 password,
                 from_email: from,
                 to_email: to,
+                security: super::email::SmtpSecurity::from_config(
+                    ch.config_json["smtp_security"].as_str(),
+                    port,
+                ),
             })
         }
         ChannelType::Webhook => {
             let url = ch.config_json["endpoint_url"]
                 .as_str()
-                .unwrap_or("http://localhost:9000/webhook")
+                .unwrap_or_default()
                 .to_string();
             Box::new(WebhookChannel::new(ch.name.clone(), url))
         }
@@ -90,6 +99,11 @@ impl AlertDispatcher {
         }
     }
 
+    /// Drops expired deduplication entries (called periodically).
+    pub fn cleanup(&self) {
+        self.throttler.cleanup();
+    }
+
     /// Dispatch alert to a single channel by ID without throttling (used for channel testing) (Mục 36)
     pub async fn dispatch_single_channel(
         &self,
@@ -124,7 +138,7 @@ impl AlertDispatcher {
         // 1. Throttling / Deduplication check (distributed via Redis if active)
         if self
             .throttler
-            .should_throttle_async(alert.rule_id, alert.src_ip)
+            .should_throttle_alert(alert)
             .await
         {
             info!(

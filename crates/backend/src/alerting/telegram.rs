@@ -82,8 +82,8 @@ impl NotificationChannel for TelegramChannel {
                 alert.severity,
                 escape_html(&alert.title),
                 escape_html(&alert.description),
-                escape_html(&alert.src_ip.to_string()),
-                escape_html(&alert.dst_ip.to_string()),
+                escape_html(&alert.src_ip.ip().to_string()),
+                escape_html(&alert.dst_ip.ip().to_string()),
                 alert.detected_at.to_rfc3339()
             );
 
@@ -107,7 +107,13 @@ impl NotificationChannel for TelegramChannel {
                 }
                 Ok(res) => {
                     let status = res.status();
-                    let body = res.text().await.unwrap_or_default();
+                    let body: String = res
+                        .text()
+                        .await
+                        .unwrap_or_default()
+                        .chars()
+                        .take(300)
+                        .collect();
                     let msg = format!(
                         "Telegram API responded with error status {}: {}",
                         status, body
@@ -116,7 +122,8 @@ impl NotificationChannel for TelegramChannel {
                     Err(AppError::Internal(msg))
                 }
                 Err(e) => {
-                    let msg = format!("Telegram API request failed: {}", e);
+                    // without_url(): the request URL embeds the bot token.
+                    let msg = format!("Telegram API request failed: {}", e.without_url());
                     warn!("{}", msg);
                     Err(AppError::Internal(msg))
                 }

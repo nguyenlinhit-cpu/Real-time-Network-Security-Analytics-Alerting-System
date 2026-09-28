@@ -6,8 +6,6 @@ use axum::{
 use chrono::{DateTime, Utc};
 use common::models::Alert;
 
-use common::ApiResponse;
-
 use crate::{auth::middleware::CurrentUser, error::AppError, state::AppState};
 
 #[derive(serde::Deserialize)]
@@ -48,7 +46,7 @@ fn sanitize_csv_cell(val: &str) -> String {
     ),
     responses(
         (status = 200, description = "CSV incident report; header X-Report-Truncated=true when the limit was reached", body = String),
-        (status = 400, description = "Unsupported format", body = ApiResponse<()>)
+        (status = 400, description = "Unsupported format", body = common::ApiResponse<()>)
     ),
     tag = "Alerts",
     security(("bearer_auth" = []))

@@ -10,7 +10,10 @@ use utoipa_swagger_ui::SwaggerUi;
 use crate::{
     auth::middleware::auth_middleware,
     handlers::*,
-    middleware::{correlation_id_middleware, rate_limit_middleware, security_headers_middleware},
+    middleware::{
+        client_ip_middleware, correlation_id_middleware, rate_limit_middleware,
+        security_headers_middleware,
+    },
     state::AppState,
 };
 
@@ -46,6 +49,7 @@ use crate::{
         notifications::update_channel,
         notifications::delete_channel,
         notifications::test_channel,
+        reports::export_reports,
     ),
     components(
         schemas(
@@ -82,7 +86,10 @@ use crate::{
         (name = "Rules", description = "Detection Rule Configurations"),
         (name = "Devices", description = "Discovered Network Nodes & Inventory"),
         (name = "Blocklist", description = "Active IP Blacklist & Threat Mitigation"),
-        (name = "Notifications", description = "Notification Channel Settings & Dispatch")
+        (name = "Notifications", description = "Notification Channel Settings & Dispatch"),
+        (name = "Sensor", description = "Capture Sensor Health"),
+        (name = "Audit", description = "Security Audit Trail"),
+        (name = "System", description = "Health & Metrics")
     )
 )]
 pub struct ApiDoc;
@@ -168,43 +175,49 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/sensor/heartbeat", post(sensor::record_heartbeat));
 
     // 5. Configurable CORS whitelist (Mục 13)
-    let cors_env =
-        std::env::var("CORS_ALLOWED_ORIGINS").or_else(|_| std::env::var("CORS_ALLOWED_ORIGIN"));
-    let cors = if let Ok(origins_str) = cors_env {
-        let origins: Vec<axum::http::HeaderValue> = origins_str
-            .split(',')
-            .filter_map(|s| s.trim().parse::<axum::http::HeaderValue>().ok())
-            .collect();
-        if origins.is_empty() {
-            CorsLayer::new()
-                .allow_origin(Any)
-                .allow_methods(Any)
-                .allow_headers(Any)
-        } else {
-            CorsLayer::new()
-                .allow_origin(origins)
-                .allow_methods(Any)
-                .allow_headers(Any)
-        }
-    } else {
-        CorsLayer::new()
-            .allow_origin(Any)
-            .allow_methods(Any)
-            .allow_headers(Any)
-    };
+    // The UI is served same-origin (nginx / trunk proxy), so cross-origin access is limited to an
+    // explicit whitelist. Never fall back to `*`.
+    let origins_str = std::env::var("CORS_ALLOWED_ORIGINS")
+        .or_else(|_| std::env::var("CORS_ALLOWED_ORIGIN"))
+        .unwrap_or_else(|_| "http://localhost:3000,http://127.0.0.1:3000,https://localhost".to_string());
+    let origins: Vec<axum::http::HeaderValue> = origins_str
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && *s != "*")
+        .filter_map(|s| s.parse::<axum::http::HeaderValue>().ok())
+        .collect();
+    let cors = CorsLayer::new()
+        .allow_origin(origins)
+        .allow_methods(Any)
+        .allow_headers(Any);
 
-    Router::new()
+    let mut router = Router::new()
         .merge(auth_routes)
         .merge(protected_routes)
         .merge(ws_routes)
-        .merge(system_routes)
-        .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
+        .merge(system_routes);
+
+    // API docs are a reconnaissance aid; only serve them outside production unless forced.
+    let is_prod = std::env::var("ENVIRONMENT")
+        .or_else(|_| std::env::var("APP_ENV"))
+        .map(|e| e.eq_ignore_ascii_case("production") || e.eq_ignore_ascii_case("prod"))
+        .unwrap_or(false);
+    let swagger_forced = std::env::var("ENABLE_SWAGGER")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+    if !is_prod || swagger_forced {
+        router = router
+            .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()));
+    }
+
+    router
         .layer(middleware::from_fn(correlation_id_middleware))
         .layer(middleware::from_fn(security_headers_middleware))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             rate_limit_middleware,
         ))
+        .layer(middleware::from_fn(client_ip_middleware))
         .layer(cors)
         .with_state(state)
 }

@@ -1,18 +1,16 @@
 use common::models::{Alert, ChannelType};
-use reqwest::Client;
 use serde_json::json;
 use std::future::Future;
 use std::pin::Pin;
 use tracing::{error, info, warn};
 
 use super::traits::NotificationChannel;
-use super::webhook::validate_webhook_url_ext;
+use super::webhook::{pinned_client, validate_and_resolve};
 use crate::error::AppError;
 
 pub struct SlackChannel {
     pub name: String,
     pub webhook_url: String,
-    pub client: Client,
     pub allow_private_ips: bool,
 }
 
@@ -21,14 +19,16 @@ impl SlackChannel {
         Self {
             name,
             webhook_url,
-            client: Client::builder()
-                .timeout(std::time::Duration::from_secs(5))
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .unwrap_or_default(),
             allow_private_ips: false,
         }
     }
+}
+
+/// Slack mrkdwn control characters must be escaped so alert text cannot inject links/mentions.
+fn escape_mrkdwn(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 impl NotificationChannel for SlackChannel {
@@ -45,23 +45,22 @@ impl NotificationChannel for SlackChannel {
         alert: &'a Alert,
     ) -> Pin<Box<dyn Future<Output = Result<(), AppError>> + Send + 'a>> {
         Box::pin(async move {
-            if let Err(e) =
-                validate_webhook_url_ext(&self.webhook_url, true, self.allow_private_ips).await
-            {
-                error!(
-                    "🚨 [SSRF BLOCKED] Slack delivery aborted for {}: {}",
-                    self.webhook_url, e
-                );
-                return Err(e);
-            }
+            let (url, pinned) =
+                match validate_and_resolve(&self.webhook_url, true, self.allow_private_ips).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        error!("🚨 [SSRF BLOCKED] Slack delivery aborted: {}", e);
+                        return Err(e);
+                    }
+                };
 
             let text = format!(
                 "🚨 *[SecNet Alert - {:?}]* *{}*\n_{}_\n• *Source IP:* `{}`\n• *Target IP:* `{}`\n• *Time:* `{}`",
                 alert.severity,
-                alert.title,
-                alert.description,
-                alert.src_ip,
-                alert.dst_ip,
+                escape_mrkdwn(&alert.title),
+                escape_mrkdwn(&alert.description),
+                alert.src_ip.ip(),
+                alert.dst_ip.ip(),
                 alert.detected_at.to_rfc3339()
             );
 
@@ -83,9 +82,8 @@ impl NotificationChannel for SlackChannel {
                 alert.title
             );
 
-            let response = self
-                .client
-                .post(&self.webhook_url)
+            let response = pinned_client(&url, pinned)
+                .post(url.clone())
                 .json(&payload)
                 .send()
                 .await;
@@ -97,13 +95,20 @@ impl NotificationChannel for SlackChannel {
                 }
                 Ok(res) => {
                     let status = res.status();
-                    let body = res.text().await.unwrap_or_default();
+                    let body: String = res
+                        .text()
+                        .await
+                        .unwrap_or_default()
+                        .chars()
+                        .take(300)
+                        .collect();
                     let msg = format!("Slack webhook error {}: {}", status, body);
                     warn!("{}", msg);
                     Err(AppError::Internal(msg))
                 }
                 Err(e) => {
-                    let msg = format!("Slack delivery failed: {}", e);
+                    // without_url(): the Slack webhook URL itself is a secret.
+                    let msg = format!("Slack delivery failed: {}", e.without_url());
                     warn!("{}", msg);
                     Err(AppError::Internal(msg))
                 }

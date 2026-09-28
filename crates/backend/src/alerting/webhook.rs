@@ -181,7 +181,6 @@ pub fn pinned_client(url: &reqwest::Url, pinned: Option<SocketAddr>) -> Client {
 pub struct WebhookChannel {
     pub name: String,
     pub endpoint_url: String,
-    pub client: Client,
     pub require_https: bool,
     pub allow_private_ips: bool,
 }
@@ -204,11 +203,6 @@ impl WebhookChannel {
         Self {
             name,
             endpoint_url,
-            client: Client::builder()
-                .timeout(std::time::Duration::from_secs(5))
-                .redirect(reqwest::redirect::Policy::none()) // Prevent redirect SSRF
-                .build()
-                .unwrap_or_default(),
             require_https,
             allow_private_ips,
         }
