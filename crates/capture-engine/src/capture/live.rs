@@ -2,6 +2,7 @@ use chrono::Utc;
 use common::models::TrafficEvent;
 use ipnetwork::IpNetwork;
 use pnet::datalink::{self, Channel::Ethernet, NetworkInterface};
+use pnet::packet::arp::ArpPacket;
 use pnet::packet::ethernet::{EtherTypes, EthernetPacket};
 use pnet::packet::ip::IpNextHeaderProtocols;
 use pnet::packet::ipv4::Ipv4Packet;
@@ -70,9 +71,58 @@ impl LiveCapture {
         })
     }
 
+    /// Extract DNS query domain from UDP payload (offset 12 is question section)
+    fn parse_dns_query_domain(data: &[u8]) -> Option<String> {
+        if data.len() < 13 {
+            return None;
+        }
+        let mut offset = 12; // Skip 12-byte DNS header
+        let mut labels = Vec::new();
+        while offset < data.len() {
+            let len = data[offset] as usize;
+            if len == 0 {
+                break;
+            }
+            if len >= 64 || offset + 1 + len > data.len() {
+                return None;
+            }
+            offset += 1;
+            let label = std::str::from_utf8(&data[offset..offset + len]).ok()?;
+            labels.push(label);
+            offset += len;
+        }
+        if labels.is_empty() {
+            None
+        } else {
+            Some(labels.join("."))
+        }
+    }
+
     fn parse_ethernet_frame(packet: &[u8], iface: &str) -> Option<TrafficEvent> {
         let eth = EthernetPacket::new(packet)?;
         let eth_payload = eth.payload();
+
+        // 1. Support ARP Packet Parsing (Mục 3)
+        if eth.get_ethertype() == EtherTypes::Arp {
+            if let Some(arp) = ArpPacket::new(eth_payload) {
+                let src = IpNetwork::new(std::net::IpAddr::V4(arp.get_sender_proto_addr()), 32).ok()?;
+                let dst = IpNetwork::new(std::net::IpAddr::V4(arp.get_target_proto_addr()), 32).ok()?;
+                return Some(TrafficEvent {
+                    time: Utc::now(),
+                    id: Uuid::new_v4(),
+                    src_ip: src,
+                    dst_ip: dst,
+                    src_port: 0,
+                    dst_port: 0,
+                    protocol: "ARP".to_string(),
+                    bytes_transferred: packet.len() as i64,
+                    packet_count: 1,
+                    flags: format!("MAC:{}", arp.get_sender_hw_addr()),
+                    interface_name: iface.to_string(),
+                });
+            }
+            return None;
+        }
 
         let (src_ip, dst_ip, next_protocol, l4_payload) = match eth.get_ethertype() {
             EtherTypes::Ipv4 => {
@@ -122,6 +172,14 @@ impl LiveCapture {
                 if let Some(udp) = UdpPacket::new(l4_payload) {
                     src_port = udp.get_source() as i32;
                     dst_port = udp.get_destination() as i32;
+
+                    // 2. Support DNS Packet Parsing (Mục 3)
+                    let udp_payload = udp.payload();
+                    if (src_port == 53 || dst_port == 53) && udp_payload.len() > 12 {
+                        if let Some(domain) = Self::parse_dns_query_domain(udp_payload) {
+                            flags = format!("DNS:{}", domain);
+                        }
+                    }
                 }
             }
             IpNextHeaderProtocols::Icmp => {

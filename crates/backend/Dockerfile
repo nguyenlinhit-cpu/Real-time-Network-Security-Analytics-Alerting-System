@@ -22,6 +22,7 @@ FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y \
     ca-certificates \
+    curl \
     libssl3 \
     libpcap0.8 \
     && rm -rf /var/lib/apt/lists/*

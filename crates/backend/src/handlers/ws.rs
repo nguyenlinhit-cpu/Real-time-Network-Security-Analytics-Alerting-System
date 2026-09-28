@@ -1,19 +1,56 @@
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        State,
+        Query, State,
     },
     response::IntoResponse,
 };
-use tracing::info;
+use serde::Deserialize;
+use tracing::{info, warn};
 
-use crate::state::AppState;
+use crate::{error::AppError, state::AppState};
+
+#[derive(Debug, Deserialize)]
+pub struct WsAuthQuery {
+    pub token: Option<String>,
+}
+
+fn verify_ws_token(token_str: &str, state: &AppState) -> Result<(), AppError> {
+    let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::HS256);
+    validation.validate_exp = true;
+    let token_data = jsonwebtoken::decode::<crate::auth::jwt::Claims>(
+        token_str,
+        &jsonwebtoken::DecodingKey::from_secret(state.jwt_secret.as_bytes()),
+        &validation,
+    )
+    .map_err(|e| {
+        warn!("WebSocket token authentication failed: {}", e);
+        AppError::Unauthorized(format!("Invalid WebSocket token: {}", e))
+    })?;
+
+    if token_data.claims.token_type != "access" {
+        return Err(AppError::Unauthorized("Invalid token type for WebSocket (access token required)".to_string()));
+    }
+
+    if let Some(ref jti) = token_data.claims.jti {
+        if state.revoked_tokens.contains_key(jti) {
+            return Err(AppError::Unauthorized("WebSocket token has been revoked".to_string()));
+        }
+    }
+
+    Ok(())
+}
 
 pub async fn ws_alerts_handler(
     ws: WebSocketUpgrade,
+    Query(query): Query<WsAuthQuery>,
     State(state): State<AppState>,
-) -> impl IntoResponse {
-    ws.on_upgrade(|socket| handle_alerts_socket(socket, state))
+) -> Result<impl IntoResponse, AppError> {
+    let token = query
+        .token
+        .ok_or_else(|| AppError::Unauthorized("Missing authentication token for WebSocket".to_string()))?;
+    verify_ws_token(&token, &state)?;
+    Ok(ws.on_upgrade(|socket| handle_alerts_socket(socket, state)))
 }
 
 async fn handle_alerts_socket(mut socket: WebSocket, state: AppState) {
@@ -34,9 +71,14 @@ async fn handle_alerts_socket(mut socket: WebSocket, state: AppState) {
 
 pub async fn ws_traffic_handler(
     ws: WebSocketUpgrade,
+    Query(query): Query<WsAuthQuery>,
     State(state): State<AppState>,
-) -> impl IntoResponse {
-    ws.on_upgrade(|socket| handle_traffic_socket(socket, state))
+) -> Result<impl IntoResponse, AppError> {
+    let token = query
+        .token
+        .ok_or_else(|| AppError::Unauthorized("Missing authentication token for WebSocket".to_string()))?;
+    verify_ws_token(&token, &state)?;
+    Ok(ws.on_upgrade(|socket| handle_traffic_socket(socket, state)))
 }
 
 async fn handle_traffic_socket(mut socket: WebSocket, state: AppState) {

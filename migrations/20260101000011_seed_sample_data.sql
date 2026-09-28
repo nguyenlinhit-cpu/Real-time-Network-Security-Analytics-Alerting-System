@@ -23,18 +23,26 @@ ON CONFLICT (username) DO NOTHING;
 INSERT INTO detection_rules (id, name, rule_type, condition_json, severity, is_enabled, threshold_value, time_window_seconds)
 VALUES
     ('b0000000-0000-0000-0000-000000000001', 'Port Scan Detection', 'threshold', 
-     '{"metric": "distinct_dst_ports", "group_by": "src_ip"}', 'high', true, 20.0, 10),
+     '{"metric": "distinct_dst_ports", "group_by": "src_ip"}', 'high', true, 15.0, 10),
     ('b0000000-0000-0000-0000-000000000002', 'SYN Flood / DDoS Detection', 'threshold', 
-     '{"flags": ["SYN"], "metric": "packet_rate", "group_by": "dst_ip"}', 'critical', true, 500.0, 5),
-    ('b0000000-0000-0000-0000-000000000003', 'SSH/RDP Brute-Force Detection', 'pattern', 
-     '{"dst_ports": [22, 3389], "metric": "failed_connection_attempts", "group_by": "src_ip"}', 'high', true, 5.0, 30),
-    ('b0000000-0000-0000-0000-000000000004', 'ARP Spoofing Detection', 'pattern', 
+     '{"flags": ["SYN"], "metric": "packet_rate", "group_by": "dst_ip"}', 'critical', true, 200.0, 5),
+    ('b0000000-0000-0000-0000-000000000003', 'Brute-force Attack Detection', 'pattern', 
+     '{"dst_ports": [21, 22, 23, 3389, 5432, 3306], "metric": "failed_connection_attempts", "group_by": "src_ip"}', 'high', true, 5.0, 30),
+    ('b0000000-0000-0000-0000-000000000004', 'ARP Spoofing / Poisoning Detection', 'pattern', 
      '{"metric": "mac_flapping", "group_by": "ip_address"}', 'critical', true, 1.0, 1),
     ('b0000000-0000-0000-0000-000000000005', 'DNS Tunneling Detection', 'anomaly', 
-     '{"metric": "subdomain_entropy", "dst_port": 53}', 'medium', true, 50.0, 60),
+     '{"metric": "subdomain_entropy", "dst_port": 53}', 'medium', true, 3.8, 30),
     ('b0000000-0000-0000-0000-000000000006', 'Traffic Volume Anomaly (Z-Score)', 'anomaly', 
-     '{"metric": "z_score", "window": "5m"}', 'medium', true, 3.0, 300)
-ON CONFLICT (name) DO NOTHING;
+     '{"metric": "z_score", "window": "5m"}', 'medium', true, 3.0, 100),
+    ('b0000000-0000-0000-0000-000000000007', 'ICMP Flood / Smurf Attack Detection', 'threshold', 
+     '{"metric": "icmp_packet_rate", "group_by": "dst_ip"}', 'high', true, 50.0, 5),
+    ('b0000000-0000-0000-0000-000000000008', 'C2 Beaconing / Periodic Callback Detection', 'pattern', 
+     '{"metric": "beaconing_jitter", "min_connections": 6, "max_jitter": 0.15}', 'high', true, 6.0, 60)
+ON CONFLICT (name) DO UPDATE SET 
+    threshold_value = EXCLUDED.threshold_value,
+    time_window_seconds = EXCLUDED.time_window_seconds,
+    severity = EXCLUDED.severity,
+    condition_json = EXCLUDED.condition_json;
 
 -- Seed Sample Network Devices
 INSERT INTO devices (id, ip_address, mac_address, hostname, device_type, is_trusted)

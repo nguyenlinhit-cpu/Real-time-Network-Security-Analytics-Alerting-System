@@ -31,7 +31,8 @@ pub async fn register(
     payload.validate().map_err(|e| AppError::ValidationError(e.to_string()))?;
 
     let hashed_password = hash_password(&payload.password)?;
-    let role = payload.role.unwrap_or(UserRole::Viewer);
+    // Public self-registration ALWAYS defaults to Viewer to prevent privilege escalation (Mục 9)
+    let role = UserRole::Viewer;
 
     let user = sqlx::query_as::<_, User>(
         r#"
@@ -137,6 +138,12 @@ pub async fn login(
     let user = match user_opt {
         Some(u) => u,
         None => {
+            // Mitigate timing attacks / username enumeration: perform dummy hash check (Mục 18)
+            let _ = verify_password(
+                &payload.password,
+                "$argon2id$v=19$m=19456,t=2,p=1$EUZQYeJ8Tsigy2wK3l4JXg$BI3EPWSF8ZQ2Jo3YwH44Izo/l3svF8r8vEYl94Aw808",
+            );
+
             // Track failed attempt in Redis & DashMap
             if let Some(ref redis) = state.redis {
                 let _ = redis.incr_with_expire(&lockout_key, lockout_window_secs).await;
@@ -283,7 +290,9 @@ pub async fn refresh_token(
 pub async fn logout(
     State(state): State<AppState>,
     current_user: CurrentUser,
+    payload: Option<Json<RefreshTokenPayload>>,
 ) -> Result<Json<ApiResponse<String>>, AppError> {
+    // 1. Revoke access token
     if let Some(jti) = current_user.0.jti {
         let now = chrono::Utc::now().timestamp() as usize;
         let ttl = if current_user.0.exp > now {
@@ -292,6 +301,21 @@ pub async fn logout(
             3600
         };
         state.revoke_token(jti, ttl).await;
+    }
+
+    // 2. Revoke refresh token if provided (Mục 16)
+    if let Some(Json(p)) = payload {
+        if let Ok(claims) = crate::auth::jwt::verify_token(&p.refresh_token, &state.jwt_secret) {
+            if let Some(refresh_jti) = claims.jti {
+                let now = chrono::Utc::now().timestamp() as usize;
+                let ttl = if claims.exp > now {
+                    (claims.exp - now) as u64
+                } else {
+                    7 * 24 * 3600
+                };
+                state.revoke_token(refresh_jti, ttl).await;
+            }
+        }
     }
 
     let _ = sqlx::query!(

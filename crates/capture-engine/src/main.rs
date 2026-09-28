@@ -1,12 +1,56 @@
 use capture_engine::capture::simulator::{AttackScenario, TrafficSimulator};
 use capture_engine::capture::{live::LiveCapture, PacketSource};
 use capture_engine::detection::engine::{spawn_alert_persister, DetectionEngine};
-use common::models::Alert;
+use common::models::{Alert, TrafficEvent};
 use sqlx::postgres::PgPoolOptions;
+use sqlx::PgPool;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
+
+async fn flush_traffic_batch(events: &[TrafficEvent], pool: Option<&Arc<PgPool>>) {
+    if events.is_empty() {
+        return;
+    }
+    if let Some(p) = pool {
+        // Broadcast sample event to PgListener for real-time WebSocket push (Mục 2)
+        if let Some(sample) = events.last() {
+            if let Ok(json_str) = serde_json::to_string(sample) {
+                let _ = sqlx::query("SELECT pg_notify('new_traffic', $1)")
+                    .bind(json_str)
+                    .execute(p.as_ref())
+                    .await;
+            }
+        }
+
+        // Batch insert traffic events into TimescaleDB hypertable
+        let mut query_builder = sqlx::QueryBuilder::new(
+            "INSERT INTO traffic_events (time, id, src_ip, dst_ip, src_port, dst_port, protocol, bytes_transferred, packet_count, flags, interface_name) "
+        );
+
+        query_builder.push_values(events, |mut b, ev| {
+            b.push_bind(ev.time)
+                .push_bind(ev.id)
+                .push_bind(ev.src_ip)
+                .push_bind(ev.dst_ip)
+                .push_bind(ev.src_port)
+                .push_bind(ev.dst_port)
+                .push_bind(&ev.protocol)
+                .push_bind(ev.bytes_transferred)
+                .push_bind(ev.packet_count)
+                .push_bind(&ev.flags)
+                .push_bind(&ev.interface_name);
+        });
+
+        let query = query_builder.build();
+        if let Err(e) = query.execute(p.as_ref()).await {
+            tracing::warn!("Failed to persist batch of {} traffic events: {}", events.len(), e);
+        } else {
+            tracing::debug!("Persisted {} traffic events to TimescaleDB", events.len());
+        }
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -46,6 +90,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Spawn alert persister background task
     spawn_alert_persister(alert_rx, pool.clone());
 
+    // Create channel for captured traffic events to batch persist and stream (Mục 2)
+    let (traffic_tx, mut traffic_rx) = mpsc::channel::<TrafficEvent>(5000);
+    let pool_traffic = pool.clone();
+    tokio::spawn(async move {
+        let mut buffer: Vec<TrafficEvent> = Vec::with_capacity(100);
+        let mut interval = tokio::time::interval(Duration::from_millis(500));
+        loop {
+            tokio::select! {
+                Some(event) = traffic_rx.recv() => {
+                    buffer.push(event);
+                    if buffer.len() >= 100 {
+                        flush_traffic_batch(&buffer, pool_traffic.as_ref()).await;
+                        buffer.clear();
+                    }
+                }
+                _ = interval.tick() => {
+                    if !buffer.is_empty() {
+                        flush_traffic_batch(&buffer, pool_traffic.as_ref()).await;
+                        buffer.clear();
+                    }
+                }
+            }
+        }
+    });
+
     // Initialize detection engine
     let mut engine = DetectionEngine::new(alert_tx);
 
@@ -62,6 +131,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let engine = Arc::new(tokio::sync::Mutex::new(engine));
+
+    // Listen for rule changes in PostgreSQL to hot-reload in real-time (Mục 6)
+    if let Some(ref p) = pool {
+        let pool_rules = p.clone();
+        let engine_rules = engine.clone();
+        tokio::spawn(async move {
+            if let Ok(mut listener) = sqlx::postgres::PgListener::connect_with(pool_rules.as_ref()).await {
+                if listener.listen("rules_changed").await.is_ok() {
+                    info!("📡 Detection engine subscribed to 'rules_changed' notification channel");
+                    while let Ok(_) = listener.recv().await {
+                        info!("🔄 Rule change notification received! Reloading rules configuration from DB...");
+                        let mut eng = engine_rules.lock().await;
+                        let _ = eng.reload_rules_from_db(pool_rules.as_ref()).await;
+                    }
+                }
+            }
+        });
+    }
 
     // Periodic state snapshotting background task (persists ARP cache, sliding windows every 30s)
     let engine_snapshot = engine.clone();
@@ -86,19 +173,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let mut sim = TrafficSimulator::new(interface_name.clone());
 
-        // Select attack scenario based on environment variable (or run demonstration cycle)
-        let _scenario_type = std::env::var("DEMO_SCENARIO").unwrap_or_else(|_| "all".to_string());
+        // Select attack scenario based on environment variable (or run demonstration cycle) (Mục 44)
+        let scenario_type = std::env::var("DEMO_SCENARIO").unwrap_or_else(|_| "all".to_string());
+        let packets_per_sec = std::env::var("SIMULATION_PACKETS_PER_SEC")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(20);
+        let sleep_ms = 1000 / packets_per_sec.clamp(1, 1000);
 
         let engine_sim = engine.clone();
+        let traffic_tx_sim = traffic_tx.clone();
+
         tokio::spawn(async move {
             let mut packet_count: u64 = 0;
             let mut scenario_idx = 0;
+            let target_ip = "192.168.1.50/32".parse().unwrap();
+
+            // Set fixed scenario if specified
+            match scenario_type.to_lowercase().as_str() {
+                "port_scan" => sim.set_scenario(AttackScenario::PortScan { target_ip, start_port: 20, port_count: 30 }),
+                "syn_flood" => sim.set_scenario(AttackScenario::SynFlood { target_ip, packet_count: 250 }),
+                "brute_force" => sim.set_scenario(AttackScenario::BruteForce { target_ip, port: 22, attempts: 10 }),
+                "arp_spoof" => sim.set_scenario(AttackScenario::ArpSpoof {
+                    target_ip: "192.168.1.1/32".parse().unwrap(),
+                    fake_mac: "de:ad:be:ef:00:01".to_string(),
+                }),
+                "dns_tunnel" => sim.set_scenario(AttackScenario::DnsTunneling { query_count: 15 }),
+                "volume_spike" => sim.set_scenario(AttackScenario::TrafficVolumeSpike { multiplier: 10 }),
+                _ => {}
+            }
 
             loop {
-                // Periodically rotate attack scenarios for demo purposes
-                if packet_count % 50 == 0 {
-                    let target_ip = "192.168.1.50/32".parse().unwrap();
-                    match scenario_idx % 5 {
+                // If "all", periodically rotate all 6 attack scenarios
+                if scenario_type.eq_ignore_ascii_case("all") && packet_count % 50 == 0 {
+                    match scenario_idx % 6 {
                         0 => {
                             info!("▶️ [DEMO SCENARIO] Triggering Port Scan attack against 192.168.1.50");
                             sim.set_scenario(AttackScenario::PortScan { target_ip, start_port: 20, port_count: 30 });
@@ -118,9 +226,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 fake_mac: "de:ad:be:ef:00:01".to_string(),
                             });
                         }
-                        _ => {
+                        4 => {
                             info!("▶️ [DEMO SCENARIO] Triggering DNS Tunneling exfiltration via 8.8.8.8");
                             sim.set_scenario(AttackScenario::DnsTunneling { query_count: 15 });
+                        }
+                        _ => {
+                            info!("▶️ [DEMO SCENARIO] Triggering Traffic Volume Spike (Z-Score Anomaly)");
+                            sim.set_scenario(AttackScenario::TrafficVolumeSpike { multiplier: 10 });
                         }
                     }
                     scenario_idx += 1;
@@ -129,13 +241,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let Some(event) = sim.next_event().await {
                     packet_count += 1;
                     engine_sim.lock().await.process_event(&event).await;
+                    let _ = traffic_tx_sim.try_send(event);
 
                     if packet_count % 100 == 0 {
                         info!("Processed {} simulated packets successfully", packet_count);
                     }
                 }
 
-                tokio::time::sleep(Duration::from_millis(50)).await;
+                tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
             }
         });
     } else {
@@ -143,9 +256,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         match LiveCapture::new(&interface_name) {
             Ok(mut live) => {
                 let engine_live = engine.clone();
+                let traffic_tx_live = traffic_tx.clone();
                 tokio::spawn(async move {
                     while let Some(event) = live.next_event().await {
                         engine_live.lock().await.process_event(&event).await;
+                        let _ = traffic_tx_live.try_send(event);
                     }
                 });
             }
@@ -155,12 +270,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Keep the main process running
-    tokio::signal::ctrl_c().await?;
+    // Keep the main process running: Handle both SIGINT and SIGTERM (Mục 44)
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigterm = signal(SignalKind::terminate()).expect("Failed to register SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                info!("Received SIGINT signal, shutting down...");
+            }
+            _ = sigterm.recv() => {
+                info!("Received SIGTERM signal (e.g. docker stop), shutting down...");
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c().await?;
+    }
+
     info!("Shutting down detection engine gracefully.");
     if let Err(e) = engine.lock().await.save_state_to_file(&state_file) {
         warn!("Could not save rules state to {}: {}", state_file, e);
     }
     Ok(())
 }
-

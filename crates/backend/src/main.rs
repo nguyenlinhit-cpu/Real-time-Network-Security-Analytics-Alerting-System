@@ -33,6 +33,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
     info!("Connected to PostgreSQL/TimescaleDB at {}", database_url);
 
+    // Run database migrations automatically on startup (Mục 42)
+    info!("📦 Checking and applying database migrations...");
+    if let Err(e) = sqlx::migrate!("./migrations").run(&pool).await {
+        tracing::warn!("Migration notice: {}. Continuing startup.", e);
+    } else {
+        info!("✅ Database migrations verified and up to date.");
+    }
+
     // Broadcast channels for real-time WebSockets
     let (alert_broadcast_tx, _) = broadcast::channel::<Alert>(1000);
     let (traffic_broadcast_tx, _) = broadcast::channel::<TrafficEvent>(5000);
@@ -49,17 +57,89 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         redis_client.clone(),
     ));
 
+    // Real-time Pipeline Connector: PostgreSQL LISTEN/NOTIFY for new alerts (Mục 1)
+    let alert_pool = pool.clone();
+    let alert_tx_listener = alert_broadcast_tx.clone();
+    let alert_disp = alert_dispatcher.clone();
+    tokio::spawn(async move {
+        let mut listener = match sqlx::postgres::PgListener::connect_with(&alert_pool).await {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::error!("Failed to initialize PgListener for alerts: {}", e);
+                return;
+            }
+        };
+
+        if let Err(e) = listener.listen("new_alert").await {
+            tracing::error!("Failed to subscribe to 'new_alert' notifications: {}", e);
+            return;
+        }
+        info!("📡 Alert real-time bridge connected via PostgreSQL LISTEN 'new_alert'");
+
+        while let Ok(notification) = listener.recv().await {
+            let payload = notification.payload();
+            if let Ok(alert_id) = payload.parse::<uuid::Uuid>() {
+                let alert_res = sqlx::query_as::<_, Alert>(
+                    "SELECT id, rule_id, severity, title, description, src_ip, dst_ip, detected_at, status, acknowledged_by, resolved_at FROM alerts WHERE id = $1"
+                )
+                .bind(alert_id)
+                .fetch_optional(&alert_pool)
+                .await;
+
+                if let Ok(Some(alert)) = alert_res {
+                    info!("🔔 [REAL-TIME PIPELINE] Received alert {} ({}) -> Dispatching to WS and channels", alert.id, alert.title);
+                    let _ = alert_tx_listener.send(alert.clone());
+                    let disp = alert_disp.clone();
+                    tokio::spawn(async move {
+                        disp.dispatch(&alert).await;
+                    });
+                }
+            }
+        }
+    });
+
+    // Real-time Pipeline Connector: PostgreSQL LISTEN/NOTIFY for live traffic stream (Mục 2)
+    let traffic_pool = pool.clone();
+    let traffic_tx_listener = traffic_broadcast_tx.clone();
+    tokio::spawn(async move {
+        let mut listener = match sqlx::postgres::PgListener::connect_with(&traffic_pool).await {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::error!("Failed to initialize PgListener for traffic: {}", e);
+                return;
+            }
+        };
+
+        if let Err(e) = listener.listen("new_traffic").await {
+            tracing::error!("Failed to subscribe to 'new_traffic' notifications: {}", e);
+            return;
+        }
+        info!("📡 Traffic real-time bridge connected via PostgreSQL LISTEN 'new_traffic'");
+
+        while let Ok(notification) = listener.recv().await {
+            let payload = notification.payload();
+            if let Ok(event) = serde_json::from_str::<TrafficEvent>(payload) {
+                let _ = traffic_tx_listener.send(event);
+            }
+        }
+    });
+
     let env = std::env::var("ENVIRONMENT")
         .or_else(|_| std::env::var("APP_ENV"))
         .unwrap_or_else(|_| "development".to_string());
     let is_prod = env.eq_ignore_ascii_case("production") || env.eq_ignore_ascii_case("prod");
 
     if is_prod {
-        if jwt_secret.starts_with("super_secret") || jwt_secret.len() < 32 {
-            tracing::error!("🚨 FATAL SECURITY ERROR: Server refused to start in production with missing, default, or weak JWT_SECRET! (must be >= 32 characters and not default)");
+        let lower_secret = jwt_secret.to_lowercase();
+        if lower_secret.contains("super_secret")
+            || lower_secret.contains("change_in_production")
+            || lower_secret.contains("default")
+            || jwt_secret.len() < 32
+        {
+            tracing::error!("🚨 FATAL SECURITY ERROR: Server refused to start in production with missing, default, or weak JWT_SECRET! (must be >= 32 characters and not default/placeholder)");
             panic!("Production requires a strong, unique JWT_SECRET with at least 32 characters!");
         }
-    } else if jwt_secret.starts_with("super_secret") {
+    } else if jwt_secret.starts_with("super_secret") || jwt_secret.contains("change_in_production") {
         tracing::warn!("⚠️ SECURITY WARNING: Using default insecure JWT_SECRET! Please set a unique JWT_SECRET in production.");
     }
 

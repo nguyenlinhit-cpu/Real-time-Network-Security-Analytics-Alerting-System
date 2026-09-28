@@ -90,7 +90,10 @@ impl DetectionEngine {
 
         for db_rule in db_rules {
             for rule in &mut self.rules {
-                if rule.name() == db_rule.name {
+                let matches = rule.name() == db_rule.name
+                    || (rule.name() == "Brute-force Attack Detection" && db_rule.name == "SSH/RDP Brute-Force Detection")
+                    || (rule.name() == "ARP Spoofing / Poisoning Detection" && db_rule.name == "ARP Spoofing Detection");
+                if matches {
                     rule.update_config(&db_rule);
                     info!("Updated configuration for rule: {}", rule.name());
                 }
@@ -125,6 +128,26 @@ impl DetectionEngine {
             }
         }
     }
+}
+
+/// Check if an IP address belongs to the infrastructure allowlist (Mục 17)
+pub fn is_allowlisted_ip(ip: &IpNetwork) -> bool {
+    let ip_addr = ip.ip();
+    if ip_addr.is_loopback() {
+        return true;
+    }
+    let ip_str = ip_addr.to_string();
+    if ip_str == "192.168.1.1" || ip_str == "8.8.8.8" || ip_str == "1.1.1.1" {
+        return true;
+    }
+    if let Ok(allowlist) = std::env::var("ALLOWLIST_IPS") {
+        for allowed in allowlist.split(',') {
+            if allowed.trim() == ip_str {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Helper to trigger active OS firewall blocking (iptables / nftables)
@@ -175,32 +198,36 @@ pub fn spawn_alert_persister(mut alert_rx: Receiver<Alert>, pool: Option<Arc<PgP
 
     tokio::spawn(async move {
         while let Some(alert) = alert_rx.recv().await {
-            // Auto-Response: If alert is Critical, auto-block attacker IP
+            // Auto-Response: If alert is Critical, auto-block attacker IP (if not in allowlist) (Mục 17)
             if auto_block_enabled && alert.severity == AlertSeverity::Critical {
-                info!("🚨 [AUTO-RESPONSE] Critical threat identified! Initiating automated response for IP {}", alert.src_ip);
+                if is_allowlisted_ip(&alert.src_ip) {
+                    info!("🛡️ [AUTO-RESPONSE] IP {} is in allowlist, skipping automated block.", alert.src_ip);
+                } else {
+                    info!("🚨 [AUTO-RESPONSE] Critical threat identified! Initiating automated response for IP {}", alert.src_ip);
 
-                // 1. Apply OS firewall block
-                apply_os_firewall_block(alert.src_ip).await;
+                    // 1. Apply OS firewall block
+                    apply_os_firewall_block(alert.src_ip).await;
 
-                // 2. Insert into database blocked_ips table
-                if let Some(ref pool) = pool {
-                    let block_reason = format!("Auto-blocked by SecNet IPS due to Critical Alert: {}", alert.title);
-                    let block_res = sqlx::query(
-                        r#"
-                        INSERT INTO blocked_ips (ip_address, reason, blocked_until)
-                        VALUES ($1, $2, CURRENT_TIMESTAMP + INTERVAL '2 hours')
-                        ON CONFLICT (ip_address) DO UPDATE SET blocked_until = CURRENT_TIMESTAMP + INTERVAL '2 hours'
-                        "#,
-                    )
-                    .bind(alert.src_ip)
-                    .bind(block_reason)
-                    .execute(pool.as_ref())
-                    .await;
+                    // 2. Insert into database blocked_ips table
+                    if let Some(ref pool) = pool {
+                        let block_reason = format!("Auto-blocked by SecNet IPS due to Critical Alert: {}", alert.title);
+                        let block_res = sqlx::query(
+                            r#"
+                            INSERT INTO blocked_ips (ip_address, reason, blocked_until)
+                            VALUES ($1, $2, CURRENT_TIMESTAMP + INTERVAL '2 hours')
+                            ON CONFLICT (ip_address) DO UPDATE SET blocked_until = CURRENT_TIMESTAMP + INTERVAL '2 hours'
+                            "#,
+                        )
+                        .bind(alert.src_ip)
+                        .bind(block_reason)
+                        .execute(pool.as_ref())
+                        .await;
 
-                    if let Err(e) = block_res {
-                        warn!("Failed to auto-insert IP into blocked_ips table: {}", e);
-                    } else {
-                        info!("🔒 Malicious IP {} registered in blocked_ips table (2h lockout)", alert.src_ip);
+                        if let Err(e) = block_res {
+                            warn!("Failed to auto-insert IP into blocked_ips table: {}", e);
+                        } else {
+                            info!("🔒 Malicious IP {} registered in blocked_ips table (2h lockout)", alert.src_ip);
+                        }
                     }
                 }
             }
@@ -228,6 +255,11 @@ pub fn spawn_alert_persister(mut alert_rx: Receiver<Alert>, pool: Option<Arc<PgP
                     warn!("Failed to persist alert to database: {}", e);
                 } else {
                     info!("Persisted alert {} successfully to database", alert.id);
+                    // Explicitly broadcast alert event to PgListener (Mục 1)
+                    let _ = sqlx::query("SELECT pg_notify('new_alert', $1)")
+                        .bind(alert.id.to_string())
+                        .execute(pool.as_ref())
+                        .await;
                 }
             }
         }
