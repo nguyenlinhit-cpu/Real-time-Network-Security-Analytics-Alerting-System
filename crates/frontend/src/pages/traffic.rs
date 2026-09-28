@@ -2,32 +2,48 @@ use common::models::TrafficEvent;
 use leptos::prelude::*;
 
 use crate::components::icons::IconSearch;
+use crate::components::traffic_chart::format_rate;
 
 #[component]
 pub fn TrafficPage(
     traffic: ReadSignal<Vec<TrafficEvent>>,
-    throughput: ReadSignal<u64>,
+    current_rate: ReadSignal<u64>,
 ) -> impl IntoView {
     let (selected_proto, set_selected_proto) = signal::<Option<String>>(None);
     let (search_text, set_search_text) = signal(String::new());
     let (is_paused, set_is_paused) = signal(false);
+    // Snapshot shown while the display is paused; live updates keep arriving underneath.
+    let (frozen, set_frozen) = signal::<Vec<TrafficEvent>>(Vec::new());
 
     let filtered_traffic = Memo::new(move |_| {
         let query = search_text.get().to_lowercase();
         let proto = selected_proto.get();
 
-        traffic
-            .get()
+        let source = if is_paused.get() {
+            frozen.get()
+        } else {
+            traffic.get()
+        };
+        source
             .into_iter()
             .filter(|t| {
-                if let Some(ref p) = proto {
-                    if !t.protocol.eq_ignore_ascii_case(p) {
-                        return false;
+                match proto.as_deref() {
+                    // DNS runs over UDP/TCP 53; the capture engine tags queries with "DNS:<name>".
+                    Some("dns") => {
+                        if !t.flags.starts_with("DNS:") {
+                            return false;
+                        }
                     }
+                    Some(p) => {
+                        if !t.protocol.eq_ignore_ascii_case(p) {
+                            return false;
+                        }
+                    }
+                    None => {}
                 }
                 if !query.is_empty() {
-                    let s_ip = t.src_ip.to_string().to_lowercase();
-                    let d_ip = t.dst_ip.to_string().to_lowercase();
+                    let s_ip = t.src_ip.ip().to_string();
+                    let d_ip = t.dst_ip.ip().to_string();
                     if !s_ip.contains(&query) && !d_ip.contains(&query) {
                         return false;
                     }
@@ -59,7 +75,7 @@ pub fn TrafficPage(
                 </div>
                 <div class="flex items-center gap-3">
                     <div class="px-3 py-1.5 rounded-md bg-ink-900 border border-ink-600 text-xs font-mono text-brand tabular-nums">
-                        {move || format!("{} B/s", throughput.get())}
+                        {move || format_rate(current_rate.get())}
                     </div>
                     <button
                         class=move || {
@@ -69,7 +85,12 @@ pub fn TrafficPage(
                                 "px-3.5 py-1.5 rounded-md bg-ink-900 hover:bg-ink-800 text-slate-300 border border-ink-600 text-xs font-semibold transition-colors"
                             }
                         }
-                        on:click=move |_| set_is_paused.update(|p| *p = !*p)
+                        on:click=move |_| {
+                            if !is_paused.get_untracked() {
+                                set_frozen.set(traffic.get_untracked());
+                            }
+                            set_is_paused.update(|p| *p = !*p);
+                        }
                     >
                         {move || if is_paused.get() { "Resume stream" } else { "Pause display" }}
                     </button>
@@ -133,10 +154,10 @@ pub fn TrafficPage(
                                             </span>
                                         </td>
                                         <td class="py-3 px-3 font-mono text-slate-200">
-                                            {format!("{}:{}", event.src_ip, event.src_port)}
+                                            {format!("{}:{}", event.src_ip.ip(), event.src_port)}
                                         </td>
                                         <td class="py-3 px-3 font-mono text-slate-200">
-                                            {format!("{}:{}", event.dst_ip, event.dst_port)}
+                                            {format!("{}:{}", event.dst_ip.ip(), event.dst_port)}
                                         </td>
                                         <td class="py-3 px-3 font-mono text-brand font-semibold">
                                             {format!("{} B", event.bytes_transferred)}

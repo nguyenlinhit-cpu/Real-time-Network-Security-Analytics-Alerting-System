@@ -1,37 +1,52 @@
-use common::models::{Alert, AlertSeverity, TrafficSummaryDto};
+use common::models::{Alert, AlertSeverity, SensorStatusDto, TrafficSummaryDto};
+use gloo_timers::future::TimeoutFuture;
 use leptos::prelude::*;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use crate::api::client::ApiClient;
 use crate::components::icons::{IconAlert, IconArrowRight, IconBan, IconDownload, IconPulse};
+use crate::components::traffic_chart::format_rate;
 use crate::components::{SeverityDonut, TrafficChart};
+
+const SUMMARY_REFRESH_MS: u32 = 15_000;
 
 #[component]
 pub fn DashboardPage(
     alerts: ReadSignal<Vec<Alert>>,
-    throughput: ReadSignal<u64>,
+    current_rate: ReadSignal<u64>,
+    rate_history: ReadSignal<Vec<u64>>,
     set_active_tab: WriteSignal<String>,
 ) -> impl IntoView {
     let (summary, set_summary) = signal::<Option<TrafficSummaryDto>>(None);
-    let (blocked_count, set_blocked_count) = signal(0usize);
+    let (blocked_count, set_blocked_count) = signal::<Option<usize>>(None);
+    let (sensors, set_sensors) = signal::<Vec<SensorStatusDto>>(Vec::new());
+    let (load_error, set_load_error) = signal::<Option<String>>(None);
 
-    Effect::new(move |_| {
-        leptos::task::spawn_local(async move {
-            if let Ok(data) = ApiClient::get_dashboard_summary().await {
-                set_summary.set(Some(data));
+    // Poll the aggregates while the page is mounted; the flag stops the loop on unmount.
+    let alive = Arc::new(AtomicBool::new(true));
+    let alive_loop = alive.clone();
+    on_cleanup(move || alive.store(false, Ordering::Relaxed));
+    leptos::task::spawn_local(async move {
+        while alive_loop.load(Ordering::Relaxed) {
+            match ApiClient::get_dashboard_summary().await {
+                Ok(data) => {
+                    set_summary.set(Some(data));
+                    set_load_error.set(None);
+                }
+                Err(e) => set_load_error.set(Some(e)),
             }
             if let Ok(blocklist) = ApiClient::get_blocklist().await {
-                set_blocked_count.set(blocklist.len());
+                set_blocked_count.set(Some(blocklist.len()));
             }
-        });
+            if let Ok(list) = ApiClient::get_sensor_status().await {
+                set_sensors.set(list);
+            }
+            TimeoutFuture::new(SUMMARY_REFRESH_MS).await;
+        }
     });
 
-    let critical_alerts = Memo::new(move |_| {
-        alerts
-            .get()
-            .iter()
-            .filter(|a| a.severity == AlertSeverity::Critical)
-            .count()
-    });
+    let critical_alerts = Memo::new(move |_| summary.get().map(|s| s.critical_alerts));
 
     let recent_alerts = Memo::new(move |_| {
         let all = alerts.get();
@@ -81,6 +96,37 @@ pub fn DashboardPage(
                 </div>
             </div>
 
+            {move || load_error.get().map(|e| view! {
+                <div class="px-4 py-2.5 rounded-md border border-sev-high/40 bg-sev-high/10 text-sev-high text-xs font-mono">
+                    {format!("Could not load dashboard metrics: {}", e)}
+                </div>
+            })}
+
+            // Sensor health (heartbeats from capture engines)
+            <div class="flex flex-wrap items-center gap-2 text-[11px] font-mono">
+                <span class="text-ink-500 uppercase tracking-wide">"Sensors:"</span>
+                {move || {
+                    let list = sensors.get();
+                    if list.is_empty() {
+                        view! { <span class="text-sev-high">"no sensor has reported yet"</span> }.into_any()
+                    } else {
+                        list.into_iter().map(|s| {
+                            let color = match s.status.as_str() {
+                                "healthy" => "border-brand/40 text-brand",
+                                "degraded" => "border-sev-medium/40 text-sev-medium",
+                                _ => "border-sev-critical/40 text-sev-critical",
+                            };
+                            view! {
+                                <span class=format!("px-2 py-1 rounded border bg-ink-950 {}", color)
+                                    title=format!("{} packets captured, {} dropped, last heartbeat {}", s.packets_captured, s.packets_dropped, s.last_heartbeat.format("%H:%M:%S"))>
+                                    {format!("{} [{}] {} · {}", s.sensor_id, s.interface_name, s.status.to_uppercase(), s.packets_captured)}
+                                </span>
+                            }
+                        }).collect::<Vec<_>>().into_any()
+                    }
+                }}
+            </div>
+
             // Metrics Cards Grid
             <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
                 // 1. Throughput
@@ -90,25 +136,25 @@ pub fn DashboardPage(
                         <span class="w-1.5 h-1.5 rounded-full bg-brand animate-ping"></span>
                     </div>
                     <div class="mt-2 text-2xl font-bold font-mono text-white tabular-nums">
-                        {move || format!("{} B/s", throughput.get())}
+                        {move || format_rate(current_rate.get())}
                     </div>
                     <div class="mt-2 text-[11px] text-brand flex items-center gap-1.5">
                         <IconPulse class="w-3 h-3".to_string() />
-                        "live pnet capture stream"
+                        "live capture stream (1 s window)"
                     </div>
                 </div>
 
                 // 2. Total Alerts
                 <div class="bg-ink-900/60 border border-ink-600 border-l-2 border-l-ink-500 rounded-lg p-5">
                     <div class="flex items-center justify-between">
-                        <span class="text-[10px] font-mono font-semibold text-ink-500 uppercase tracking-wide">"Total detected alerts"</span>
+                        <span class="text-[10px] font-mono font-semibold text-ink-500 uppercase tracking-wide">"Open alerts"</span>
                         <IconAlert class="w-3.5 h-3.5 text-ink-500".to_string() />
                     </div>
                     <div class="mt-2 text-2xl font-bold font-mono text-white tabular-nums">
-                        {move || alerts.get().len()}
+                        {move || summary.get().map(|s| s.total_alerts.to_string()).unwrap_or_else(|| "—".to_string())}
                     </div>
                     <div class="mt-2 text-[11px] text-ink-500">
-                        {move || summary.get().map(|s| format!("{} packets analyzed", s.total_packets)).unwrap_or_else(|| "Analyzing stream…".to_string())}
+                        {move || summary.get().map(|s| format!("{} packets analyzed (24h)", s.total_packets)).unwrap_or_else(|| "Analyzing stream…".to_string())}
                     </div>
                 </div>
 
@@ -119,7 +165,7 @@ pub fn DashboardPage(
                         <IconAlert class="w-3.5 h-3.5 text-sev-critical".to_string() />
                     </div>
                     <div class="mt-2 text-2xl font-bold font-mono text-sev-critical tabular-nums">
-                        {move || critical_alerts.get()}
+                        {move || critical_alerts.get().map(|c| c.to_string()).unwrap_or_else(|| "—".to_string())}
                     </div>
                     <div class="mt-2 text-[11px] text-sev-critical/80">
                         "Requires immediate analyst triage"
@@ -133,10 +179,10 @@ pub fn DashboardPage(
                         <IconBan class="w-3.5 h-3.5 text-ink-500".to_string() />
                     </div>
                     <div class="mt-2 text-2xl font-bold font-mono text-white tabular-nums">
-                        {move || blocked_count.get()}
+                        {move || blocked_count.get().map(|c| c.to_string()).unwrap_or_else(|| "—".to_string())}
                     </div>
                     <div class="mt-2 text-[11px] text-brand">
-                        "Automated threat mitigation active"
+                        "Currently enforced entries"
                     </div>
                 </div>
             </div>
@@ -144,7 +190,7 @@ pub fn DashboardPage(
             // Visual Charts Row
             <div class="grid grid-cols-1 lg:grid-cols-3 gap-5">
                 <div class="lg:col-span-2">
-                    <TrafficChart throughput=throughput />
+                    <TrafficChart history=rate_history current_rate=current_rate />
                 </div>
                 <div>
                     <SeverityDonut alerts=alerts />
@@ -244,10 +290,10 @@ pub fn DashboardPage(
                                                 {alert.title}
                                             </td>
                                             <td class="py-3 px-3 font-mono text-ink-500">
-                                                {format!("{}", alert.src_ip)}
+                                                {alert.src_ip.ip().to_string()}
                                             </td>
                                             <td class="py-3 px-3 font-mono text-ink-500">
-                                                {format!("{}", alert.dst_ip)}
+                                                {alert.dst_ip.ip().to_string()}
                                             </td>
                                             <td class="py-3 px-3 text-ink-500 font-mono text-[11px] whitespace-nowrap">
                                                 {alert.detected_at.format("%Y-%m-%d %H:%M:%S").to_string()}

@@ -1,38 +1,23 @@
-use gloo_timers::future::TimeoutFuture;
 use leptos::prelude::*;
 
 const CHART_W: f64 = 500.0;
 const CHART_H: f64 = 140.0;
 
+/// Human-readable bytes/second.
+pub fn format_rate(rate: u64) -> String {
+    if rate >= 1_000_000 {
+        format!("{:.2} MB/s", rate as f64 / 1_000_000.0)
+    } else if rate >= 1_000 {
+        format!("{:.1} KB/s", rate as f64 / 1_000.0)
+    } else {
+        format!("{} B/s", rate)
+    }
+}
+
+/// Live throughput chart. The per-second samples are produced once, app-wide, from the
+/// `/ws/traffic` batch totals.
 #[component]
-pub fn TrafficChart(throughput: ReadSignal<u64>) -> impl IntoView {
-    // Real-time throughput history (24 1-second intervals, initially 0) (Mục 47)
-    let (history, set_history) = signal(vec![0usize; 24]);
-    let (current_rate, set_current_rate) = signal(0u64);
-
-    // Track real B/s rate by computing delta over 1-second interval
-    leptos::task::spawn_local(async move {
-        let mut last_bytes = throughput.get_untracked();
-        loop {
-            TimeoutFuture::new(1000).await;
-            let current_total = throughput.get_untracked();
-            let delta = if current_total >= last_bytes {
-                current_total - last_bytes
-            } else {
-                current_total
-            };
-            last_bytes = current_total;
-
-            set_current_rate.set(delta);
-            set_history.update(|h| {
-                h.push(delta as usize);
-                if h.len() > 24 {
-                    h.remove(0);
-                }
-            });
-        }
-    });
-
+pub fn TrafficChart(history: ReadSignal<Vec<u64>>, current_rate: ReadSignal<u64>) -> impl IntoView {
     let points = Memo::new(move |_| {
         let data = history.get();
         if data.is_empty() {
@@ -80,16 +65,7 @@ pub fn TrafficChart(throughput: ReadSignal<u64>) -> impl IntoView {
 
     let last_point = Memo::new(move |_| points.get().last().copied().unwrap_or((0.0, CHART_H)));
 
-    let rate_display = Memo::new(move |_| {
-        let rate = current_rate.get();
-        if rate >= 1_000_000 {
-            format!("{:.2} MB/s", rate as f64 / 1_000_000.0)
-        } else if rate >= 1_000 {
-            format!("{:.1} KB/s", rate as f64 / 1_000.0)
-        } else {
-            format!("{} B/s", rate)
-        }
-    });
+    let rate_display = Memo::new(move |_| format_rate(current_rate.get()));
 
     view! {
         <div class="bg-ink-900/60 border border-ink-600 rounded-lg p-6 h-full">

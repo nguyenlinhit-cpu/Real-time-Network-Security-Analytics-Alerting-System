@@ -1,5 +1,5 @@
 use crate::api::client::ApiClient;
-use crate::components::icons::{IconAlert, IconMoon, IconRadar, IconSun};
+use crate::components::icons::{IconAlert, IconRadar};
 use common::models::UserPublicDto;
 use leptos::prelude::*;
 
@@ -13,24 +13,15 @@ pub fn Navbar(
 ) -> impl IntoView {
     let on_logout = move |_| {
         leptos::task::spawn_local(async move {
+            // Revoke the tokens server-side before leaving the session.
             ApiClient::api_logout().await;
+            set_current_user.set(None);
+            set_active_tab.set("login".to_string());
         });
-        set_current_user.set(None);
-        set_active_tab.set("login".to_string());
     };
 
     let on_sign_in = move |_| {
         set_active_tab.set("login".to_string());
-    };
-
-    let (is_dark, set_is_dark) = signal(true);
-    let on_toggle_theme = move |_| {
-        set_is_dark.update(|d| *d = !*d);
-        if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
-            if let Some(el) = doc.document_element() {
-                let _ = el.class_list().toggle("dark");
-            }
-        }
     };
 
     view! {
@@ -80,20 +71,8 @@ pub fn Navbar(
                 </div>
             </div>
 
-            // Right side: Theme Toggle, Critical Alert Counter, User, Logout
+            // Right side: Critical Alert Counter, User, Logout
             <div class="flex items-center gap-2.5">
-                <button
-                    on:click=on_toggle_theme
-                    class="p-2 rounded-md bg-ink-950 border border-ink-600 hover:border-brand/40 text-ink-500 hover:text-brand transition-colors"
-                    title="Toggle Theme"
-                >
-                    {move || if is_dark.get() {
-                        view! { <IconMoon class="w-3.5 h-3.5".to_string() /> }.into_any()
-                    } else {
-                        view! { <IconSun class="w-3.5 h-3.5".to_string() /> }.into_any()
-                    }}
-                </button>
-
                 // Critical Alert Badge
                 {move || {
                     let count = critical_count.get();

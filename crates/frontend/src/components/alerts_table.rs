@@ -1,8 +1,8 @@
-use common::models::{Alert, AlertSeverity, AlertStatus, TrafficEvent, UserRole};
+use common::models::{Alert, AlertSeverity, AlertStatus, TrafficEvent};
 use leptos::prelude::*;
 use uuid::Uuid;
 
-use crate::api::client::ApiClient;
+use crate::api::client::{AlertQuery, ApiClient};
 use crate::components::icons::{IconClose, IconSearch};
 
 #[component]
@@ -18,18 +18,20 @@ pub fn AlertsTable(
     let (related_traffic, set_related_traffic) = signal::<Vec<TrafficEvent>>(Vec::new());
     let (is_loading_traffic, set_is_loading_traffic) = signal(false);
 
-    let current_user = ApiClient::get_current_user();
-    let is_viewer = current_user
-        .map(|u| u.role == UserRole::Viewer)
-        .unwrap_or(true);
+    let is_viewer = !ApiClient::is_analyst_or_admin();
+    let (action_error, set_action_error) = signal::<Option<String>>(None);
+    let (is_loading_more, set_is_loading_more) = signal(false);
+    let (no_more, set_no_more) = signal(false);
 
     let load_related_traffic = move |alert_id: Uuid| {
         set_is_loading_traffic.set(true);
         leptos::task::spawn_local(async move {
-            if let Ok(traffic) = ApiClient::get_alert_traffic(alert_id).await {
-                set_related_traffic.set(traffic);
-            } else {
-                set_related_traffic.set(Vec::new());
+            match ApiClient::get_alert_traffic(alert_id).await {
+                Ok(traffic) => set_related_traffic.set(traffic),
+                Err(e) => {
+                    set_related_traffic.set(Vec::new());
+                    set_action_error.set(Some(format!("Could not load related traffic: {}", e)));
+                }
             }
             set_is_loading_traffic.set(false);
         });
@@ -64,14 +66,49 @@ pub fn AlertsTable(
     });
 
     let on_update_status = move |id: Uuid, new_status: AlertStatus| {
+        set_action_error.set(None);
         leptos::task::spawn_local(async move {
-            if let Ok(updated) = ApiClient::update_alert_status(id, new_status).await {
-                set_alerts.update(|list| {
+            match ApiClient::update_alert_status(id, new_status).await {
+                Ok(updated) => set_alerts.update(|list| {
                     if let Some(pos) = list.iter().position(|item| item.id == id) {
                         list[pos] = updated;
                     }
-                });
+                }),
+                Err(e) => set_action_error.set(Some(e)),
             }
+        });
+    };
+
+    // Server-side pagination with the active filters; results are merged into the shared list.
+    let on_load_more = move |_| {
+        set_is_loading_more.set(true);
+        leptos::task::spawn_local(async move {
+            let severity = filter_severity.get_untracked();
+            let status = filter_status.get_untracked();
+            let search = search_query.get_untracked();
+            let offset = filtered_alerts.get_untracked().len() as i64;
+            let query = AlertQuery {
+                severity,
+                status,
+                search: Some(search).filter(|s| !s.trim().is_empty()),
+                limit: 100,
+                offset,
+            };
+            match ApiClient::get_alerts(&query).await {
+                Ok(page) => {
+                    set_no_more.set(page.len() < 100);
+                    set_alerts.update(|list| {
+                        for alert in page {
+                            if !list.iter().any(|a| a.id == alert.id) {
+                                list.push(alert);
+                            }
+                        }
+                        list.sort_by(|a, b| b.detected_at.cmp(&a.detected_at));
+                    });
+                }
+                Err(e) => set_action_error.set(Some(e)),
+            }
+            set_is_loading_more.set(false);
         });
     };
 
@@ -143,6 +180,13 @@ pub fn AlertsTable(
                 </div>
             </div>
 
+            {move || action_error.get().map(|e| view! {
+                <div class="mb-4 px-4 py-2.5 rounded-md border border-sev-high/40 bg-sev-high/10 text-sev-high text-xs font-mono flex items-center justify-between gap-3">
+                    <span>{e}</span>
+                    <button class="text-ink-500 hover:text-white" on:click=move |_| set_action_error.set(None)>"✕"</button>
+                </div>
+            })}
+
             // Table Content
             <div class="overflow-x-auto">
                 <table class="w-full text-left text-xs text-slate-300">
@@ -159,7 +203,8 @@ pub fn AlertsTable(
                     <tbody class="divide-y divide-ink-700">
                         <For
                             each=move || filtered_alerts.get()
-                            key=|alert| alert.id
+                            // Key includes the status so a row re-renders after Acknowledge/Resolve.
+                            key=|alert| format!("{}-{:?}", alert.id, alert.status)
                             children=move |alert| {
                                 let alert_id = alert.id;
                                 let alert_clone = alert.clone();
@@ -206,12 +251,12 @@ pub fn AlertsTable(
 
                                         // Source IP
                                         <td class="py-3.5 px-3 font-mono text-slate-300 whitespace-nowrap">
-                                            {format!("{}", alert.src_ip)}
+                                            {alert.src_ip.ip().to_string()}
                                         </td>
 
                                         // Target IP
                                         <td class="py-3.5 px-3 font-mono text-slate-300 whitespace-nowrap">
-                                            {format!("{}", alert.dst_ip)}
+                                            {alert.dst_ip.ip().to_string()}
                                         </td>
 
                                         // Status
@@ -255,7 +300,13 @@ pub fn AlertsTable(
                                                         }.into_any()
                                                     } else {
                                                         view! {
-                                                            <span class="text-ink-600 text-[11px] italic">"Closed"</span>
+                                                            <button
+                                                                class="px-2.5 py-1 rounded bg-ink-800 hover:bg-ink-700 text-ink-500 border border-ink-600 text-[11px] font-medium transition-colors"
+                                                                title="Re-open this incident"
+                                                                on:click=move |_| on_update_status(alert_id, AlertStatus::Open)
+                                                            >
+                                                                "Re-open"
+                                                            </button>
                                                         }.into_any()
                                                     }
                                                 } else {
@@ -269,6 +320,16 @@ pub fn AlertsTable(
                         />
                     </tbody>
                 </table>
+                <div class="pt-4 flex items-center justify-between text-[11px] text-ink-500 font-mono">
+                    <span>{move || format!("{} incidents shown", filtered_alerts.get().len())}</span>
+                    <button
+                        class="px-3 py-1.5 rounded-md bg-ink-800 hover:bg-ink-700 text-slate-300 border border-ink-600 disabled:opacity-40"
+                        disabled=move || is_loading_more.get() || no_more.get()
+                        on:click=on_load_more
+                    >
+                        {move || if no_more.get() { "All incidents loaded" } else if is_loading_more.get() { "Loading…" } else { "Load more from server" }}
+                    </button>
+                </div>
             </div>
 
             // Inspection Drawer / Modal (Mục 20: Trang chi tiết alert kèm traffic liên quan)
@@ -307,11 +368,11 @@ pub fn AlertsTable(
                                 <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 p-4 bg-ink-950/50 border-b border-ink-700 text-xs">
                                     <div>
                                         <div class="text-[10px] font-mono uppercase text-ink-500">"Source IP"</div>
-                                        <div class="font-mono text-slate-200 mt-0.5">{format!("{}", alert.src_ip)}</div>
+                                        <div class="font-mono text-slate-200 mt-0.5">{alert.src_ip.ip().to_string()}</div>
                                     </div>
                                     <div>
                                         <div class="text-[10px] font-mono uppercase text-ink-500">"Target IP"</div>
-                                        <div class="font-mono text-slate-200 mt-0.5">{format!("{}", alert.dst_ip)}</div>
+                                        <div class="font-mono text-slate-200 mt-0.5">{alert.dst_ip.ip().to_string()}</div>
                                     </div>
                                     <div>
                                         <div class="text-[10px] font-mono uppercase text-ink-500">"MITRE Tactic"</div>

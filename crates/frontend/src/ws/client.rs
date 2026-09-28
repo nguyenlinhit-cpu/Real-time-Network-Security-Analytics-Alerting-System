@@ -1,20 +1,126 @@
-use common::models::{Alert, TrafficEvent};
-use futures::StreamExt;
+use common::models::{Alert, TrafficBatchDto, TrafficEvent};
+use futures::{future::Either, StreamExt};
 use gloo_timers::future::TimeoutFuture;
 use leptos::prelude::*;
+use std::cell::Cell;
+use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
-use web_sys::{CloseEvent, ErrorEvent, MessageEvent, WebSocket};
+use web_sys::{CloseEvent, Event, MessageEvent, WebSocket};
 
-fn get_token_query() -> String {
-    if let Some(storage) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
-        if let Ok(Some(tok)) = storage.get_item("secnet_jwt_token") {
-            if !tok.is_empty() {
-                return format!("?token={}", tok);
+use crate::api::client::ApiClient;
+
+const MAX_BACKOFF_MS: u32 = 30_000;
+const TOKEN_CHECK_MS: u32 = 2_000;
+
+fn ws_url(path: &str, token: &str) -> Option<String> {
+    let window = web_sys::window()?;
+    let location = window.location();
+    let host = location.host().ok()?;
+    let scheme = if location.protocol().unwrap_or_default() == "https:" {
+        "wss:"
+    } else {
+        "ws:"
+    };
+    let token = js_sys::encode_uri_component(token).as_string()?;
+    Some(format!("{}//{}{}?token={}", scheme, host, path, token))
+}
+
+/// Keeps one authenticated WebSocket to `path` open for as long as the user is logged in.
+/// Reconnects with exponential backoff (reset after every successful connection), closes the
+/// socket when the user logs out or the token changes, and releases its JS callbacks on close.
+fn run_stream(
+    path: &'static str,
+    on_message: Rc<dyn Fn(String)>,
+    set_connected: Option<WriteSignal<bool>>,
+) {
+    leptos::task::spawn_local(async move {
+        let mut backoff_ms = 1_000u32;
+        let mut failed_attempts = 0u32;
+        loop {
+            let Some(token) = ApiClient::get_token() else {
+                // Not logged in: wait quietly (no backoff growth) until a token appears.
+                if let Some(s) = set_connected {
+                    s.set(false);
+                }
+                failed_attempts = 0;
+                backoff_ms = 1_000;
+                TimeoutFuture::new(1_000).await;
+                continue;
+            };
+            let Some(url) = ws_url(path, &token) else {
+                TimeoutFuture::new(backoff_ms).await;
+                continue;
+            };
+
+            let opened = Rc::new(Cell::new(false));
+            if let Ok(ws) = WebSocket::new(&url) {
+                let (close_tx, mut close_rx) = futures::channel::mpsc::unbounded::<()>();
+
+                let opened_cb = opened.clone();
+                let onopen = Closure::<dyn FnMut()>::new(move || {
+                    opened_cb.set(true);
+                    if let Some(s) = set_connected {
+                        s.set(true);
+                    }
+                });
+                let handler = on_message.clone();
+                let onmessage = Closure::<dyn FnMut(MessageEvent)>::new(move |e: MessageEvent| {
+                    if let Some(txt) = e.data().as_string() {
+                        handler(txt);
+                    }
+                });
+                let tx_close = close_tx.clone();
+                let onclose = Closure::<dyn FnMut(CloseEvent)>::new(move |_| {
+                    let _ = tx_close.unbounded_send(());
+                });
+                let onerror = Closure::<dyn FnMut(Event)>::new(move |_| {
+                    let _ = close_tx.unbounded_send(());
+                });
+                ws.set_onopen(Some(onopen.as_ref().unchecked_ref()));
+                ws.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
+                ws.set_onclose(Some(onclose.as_ref().unchecked_ref()));
+                ws.set_onerror(Some(onerror.as_ref().unchecked_ref()));
+
+                loop {
+                    let tick = TimeoutFuture::new(TOKEN_CHECK_MS);
+                    match futures::future::select(close_rx.next(), tick).await {
+                        Either::Left(_) => break,
+                        Either::Right(_) => {
+                            // Logged out or token rotated: reconnect with the current credentials.
+                            if ApiClient::get_token().as_deref() != Some(token.as_str()) {
+                                let _ = ws.close();
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                ws.set_onopen(None);
+                ws.set_onmessage(None);
+                ws.set_onclose(None);
+                ws.set_onerror(None);
+                let _ = ws.close();
+                drop((onopen, onmessage, onclose, onerror));
             }
+
+            if let Some(s) = set_connected {
+                s.set(false);
+            }
+            if opened.get() {
+                backoff_ms = 1_000;
+                failed_attempts = 0;
+            } else {
+                failed_attempts += 1;
+                backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
+                // Repeated handshake failures usually mean the access token expired.
+                if failed_attempts == 2 && ApiClient::get_token().as_deref() == Some(token.as_str()) {
+                    ApiClient::refresh_session().await;
+                }
+            }
+            TimeoutFuture::new(backoff_ms).await;
         }
-    }
-    String::new()
+    });
 }
 
 pub fn init_alerts_websocket(
@@ -22,147 +128,42 @@ pub fn init_alerts_websocket(
     latest_alert: WriteSignal<Option<Alert>>,
     is_connected: WriteSignal<bool>,
 ) {
-    leptos::task::spawn_local(async move {
-        let mut backoff_ms = 1000u32;
-        loop {
-            let window = match web_sys::window() {
-                Some(w) => w,
-                None => {
-                    TimeoutFuture::new(3000).await;
-                    continue;
-                }
-            };
-            let host = window
-                .location()
-                .host()
-                .unwrap_or_else(|_| "localhost:8080".to_string());
-            let ws_protocol = if window.location().protocol().unwrap_or_default() == "https:" {
-                "wss:"
+    let handler: Rc<dyn Fn(String)> = Rc::new(move |txt: String| {
+        let Ok(alert) = serde_json::from_str::<Alert>(&txt) else {
+            return;
+        };
+        let mut is_new = true;
+        alerts_signal.update(|list| {
+            if let Some(existing) = list.iter_mut().find(|a| a.id == alert.id) {
+                *existing = alert.clone();
+                is_new = false;
             } else {
-                "ws:"
-            };
-            let token_q = get_token_query();
-            let ws_url = format!("{}//{}/ws/alerts{}", ws_protocol, host, token_q);
-
-            let (mut close_tx, mut close_rx) = futures::channel::mpsc::channel::<()>(2);
-            let mut close_tx_err = close_tx.clone();
-
-            if let Ok(ws) = WebSocket::new(&ws_url) {
-                let onopen_callback = Closure::<dyn FnMut()>::new(move || {
-                    is_connected.set(true);
-                });
-                ws.set_onopen(Some(onopen_callback.as_ref().unchecked_ref()));
-                onopen_callback.forget();
-
-                let onmessage_callback =
-                    Closure::<dyn FnMut(MessageEvent)>::new(move |e: MessageEvent| {
-                        if let Some(txt) = e.data().as_string() {
-                            if let Ok(alert) = serde_json::from_str::<Alert>(&txt) {
-                                latest_alert.set(Some(alert.clone()));
-                                alerts_signal.update(|list| {
-                                    list.insert(0, alert);
-                                    if list.len() > 100 {
-                                        list.pop();
-                                    }
-                                });
-                            }
-                        }
-                    });
-                ws.set_onmessage(Some(onmessage_callback.as_ref().unchecked_ref()));
-                onmessage_callback.forget();
-
-                let onclose_callback = Closure::<dyn FnMut(CloseEvent)>::new(move |_| {
-                    is_connected.set(false);
-                    let _ = close_tx.try_send(());
-                });
-                ws.set_onclose(Some(onclose_callback.as_ref().unchecked_ref()));
-                onclose_callback.forget();
-
-                let onerror_callback = Closure::<dyn FnMut(ErrorEvent)>::new(move |_| {
-                    is_connected.set(false);
-                    let _ = close_tx_err.try_send(());
-                });
-                ws.set_onerror(Some(onerror_callback.as_ref().unchecked_ref()));
-                onerror_callback.forget();
-
-                // Wait until the connection is actually closed before attempting to reconnect (Mục 7)
-                let _ = close_rx.next().await;
-                backoff_ms = (backoff_ms * 2).min(30000);
-            } else {
-                is_connected.set(false);
-                backoff_ms = (backoff_ms * 2).min(30000);
+                list.insert(0, alert.clone());
+                list.truncate(200);
             }
-
-            TimeoutFuture::new(backoff_ms).await;
+        });
+        if is_new {
+            latest_alert.set(Some(alert));
         }
     });
+    run_stream("/ws/alerts", handler, Some(is_connected));
 }
 
 pub fn init_traffic_websocket(
     traffic_signal: WriteSignal<Vec<TrafficEvent>>,
-    throughput_signal: WriteSignal<u64>,
+    total_bytes_signal: WriteSignal<u64>,
 ) {
-    leptos::task::spawn_local(async move {
-        let mut backoff_ms = 1000u32;
-        loop {
-            let window = match web_sys::window() {
-                Some(w) => w,
-                None => {
-                    TimeoutFuture::new(3000).await;
-                    continue;
-                }
-            };
-            let host = window
-                .location()
-                .host()
-                .unwrap_or_else(|_| "localhost:8080".to_string());
-            let ws_protocol = if window.location().protocol().unwrap_or_default() == "https:" {
-                "wss:"
-            } else {
-                "ws:"
-            };
-            let token_q = get_token_query();
-            let ws_url = format!("{}//{}/ws/traffic{}", ws_protocol, host, token_q);
-
-            let (mut close_tx, mut close_rx) = futures::channel::mpsc::channel::<()>(2);
-            let mut close_tx_err = close_tx.clone();
-
-            if let Ok(ws) = WebSocket::new(&ws_url) {
-                let onmessage = Closure::<dyn FnMut(MessageEvent)>::new(move |e: MessageEvent| {
-                    if let Some(txt) = e.data().as_string() {
-                        if let Ok(event) = serde_json::from_str::<TrafficEvent>(&txt) {
-                            throughput_signal.update(|val| *val += event.bytes_transferred as u64);
-                            traffic_signal.update(|list| {
-                                list.insert(0, event);
-                                if list.len() > 50 {
-                                    list.pop();
-                                }
-                            });
-                        }
-                    }
-                });
-                ws.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
-                onmessage.forget();
-
-                let onclose_callback = Closure::<dyn FnMut(CloseEvent)>::new(move |_| {
-                    let _ = close_tx.try_send(());
-                });
-                ws.set_onclose(Some(onclose_callback.as_ref().unchecked_ref()));
-                onclose_callback.forget();
-
-                let onerror_callback = Closure::<dyn FnMut(ErrorEvent)>::new(move |_| {
-                    let _ = close_tx_err.try_send(());
-                });
-                ws.set_onerror(Some(onerror_callback.as_ref().unchecked_ref()));
-                onerror_callback.forget();
-
-                let _ = close_rx.next().await;
-                backoff_ms = (backoff_ms * 2).min(30000);
-            } else {
-                backoff_ms = (backoff_ms * 2).min(30000);
+    let handler: Rc<dyn Fn(String)> = Rc::new(move |txt: String| {
+        let Ok(batch) = serde_json::from_str::<TrafficBatchDto>(&txt) else {
+            return;
+        };
+        total_bytes_signal.update(|v| *v += batch.total_bytes.max(0) as u64);
+        traffic_signal.update(|list| {
+            for event in batch.events.into_iter().rev() {
+                list.insert(0, event);
             }
-
-            TimeoutFuture::new(backoff_ms).await;
-        }
+            list.truncate(100);
+        });
     });
+    run_stream("/ws/traffic", handler, None);
 }

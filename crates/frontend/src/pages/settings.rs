@@ -1,5 +1,6 @@
 use common::models::{
     AlertSeverity, ChannelType, CreateNotificationChannelDto, NotificationChannel,
+    UpdateNotificationChannelDto,
 };
 use leptos::prelude::*;
 use uuid::Uuid;
@@ -26,11 +27,15 @@ pub fn SettingsPage() -> impl IntoView {
     let (smtp_user, set_smtp_user) = signal(String::new());
     let (smtp_pass, set_smtp_pass) = signal(String::new());
     let (min_severity, set_min_severity) = signal(AlertSeverity::High);
+    let (from_email, set_from_email) = signal(String::new());
+    let (smtp_security, set_smtp_security) = signal(String::from("starttls"));
+    let (pending_delete, set_pending_delete) = signal::<Option<Uuid>>(None);
 
     let load_channels = move || {
         leptos::task::spawn_local(async move {
-            if let Ok(data) = ApiClient::get_notification_channels().await {
-                set_channels.set(data);
+            match ApiClient::get_notification_channels().await {
+                Ok(data) => set_channels.set(data),
+                Err(e) => set_status_msg.set(Some(format!("Failed to load channels: {}", e))),
             }
         });
     };
@@ -51,9 +56,36 @@ pub fn SettingsPage() -> impl IntoView {
 
     let on_delete_channel = move |id: Uuid| {
         leptos::task::spawn_local(async move {
-            if ApiClient::delete_notification_channel(id).await.is_ok() {
-                set_channels.update(|list| list.retain(|c| c.id != id));
-                set_status_msg.set(Some("Notification channel removed".to_string()));
+            set_pending_delete.set(None);
+            match ApiClient::delete_notification_channel(id).await {
+                Ok(()) => {
+                    set_channels.update(|list| list.retain(|c| c.id != id));
+                    set_status_msg.set(Some("Notification channel removed".to_string()));
+                }
+                Err(e) => set_status_msg.set(Some(format!("Failed to delete channel: {}", e))),
+            }
+        });
+    };
+
+    let on_toggle_channel = move |id: Uuid, enable: bool| {
+        leptos::task::spawn_local(async move {
+            let dto = UpdateNotificationChannelDto {
+                name: None,
+                r#type: None,
+                config_json: None,
+                min_severity: None,
+                is_enabled: Some(enable),
+            };
+            match ApiClient::update_notification_channel(id, &dto).await {
+                Ok(updated) => {
+                    set_channels.update(|list| {
+                        if let Some(pos) = list.iter().position(|c| c.id == id) {
+                            list[pos] = updated;
+                        }
+                    });
+                    set_status_msg.set(Some(format!("Channel {}", if enable { "enabled" } else { "disabled" })));
+                }
+                Err(e) => set_status_msg.set(Some(format!("Failed to update channel: {}", e))),
             }
         });
     };
@@ -75,13 +107,23 @@ pub fn SettingsPage() -> impl IntoView {
                 "bot_token": tg_token.get(),
                 "chat_id": tg_chat_id.get(),
             }),
-            ChannelType::Email => serde_json::json!({
-                "smtp_host": smtp_host.get(),
-                "smtp_port": smtp_port.get().parse::<u16>().unwrap_or(587),
-                "to_email": to_email.get(),
-                "smtp_username": smtp_user.get(),
-                "smtp_password": smtp_pass.get(),
-            }),
+            ChannelType::Email => {
+                let mut cfg = serde_json::json!({
+                    "smtp_host": smtp_host.get(),
+                    "smtp_port": smtp_port.get().parse::<u16>().unwrap_or(587),
+                    "to_email": to_email.get(),
+                    "smtp_security": smtp_security.get(),
+                });
+                if !from_email.get().trim().is_empty() {
+                    cfg["from_email"] = serde_json::json!(from_email.get().trim());
+                }
+                // Only send credentials when a username is given (empty ones break auth-less relays).
+                if !smtp_user.get().trim().is_empty() {
+                    cfg["smtp_username"] = serde_json::json!(smtp_user.get().trim());
+                    cfg["smtp_password"] = serde_json::json!(smtp_pass.get());
+                }
+                cfg
+            }
         };
 
         leptos::task::spawn_local(async move {
@@ -308,6 +350,27 @@ pub fn SettingsPage() -> impl IntoView {
                                         }.into_any(),
                                     }}
 
+                                    {move || (new_type.get() == ChannelType::Email).then(|| view! {
+                                        <div class="grid grid-cols-2 gap-3">
+                                            <div>
+                                                <label class="block text-[11px] font-mono font-semibold text-ink-500 uppercase tracking-wide mb-1.5">"From address"</label>
+                                                <input type="email" placeholder="alerts@your-domain"
+                                                    class="w-full bg-ink-950 border border-ink-600 rounded-md px-3 py-2 text-xs font-mono text-slate-200 focus:outline-none focus:border-brand/60"
+                                                    prop:value=from_email
+                                                    on:input=move |e| set_from_email.set(event_target_value(&e)) />
+                                            </div>
+                                            <div>
+                                                <label class="block text-[11px] font-mono font-semibold text-ink-500 uppercase tracking-wide mb-1.5">"Connection security"</label>
+                                                <select class="w-full bg-ink-950 border border-ink-600 rounded-md px-3 py-2 text-xs text-slate-300 focus:outline-none focus:border-brand/60"
+                                                    on:change=move |e| set_smtp_security.set(event_target_value(&e))>
+                                                    <option value="starttls">"STARTTLS (587/2525)"</option>
+                                                    <option value="tls">"TLS (465)"</option>
+                                                    <option value="none">"None (local relay only)"</option>
+                                                </select>
+                                            </div>
+                                        </div>
+                                    })}
+
                                     <div class="flex items-center justify-end gap-3 pt-2">
                                         <button
                                             type="button"
@@ -336,7 +399,7 @@ pub fn SettingsPage() -> impl IntoView {
             <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <For
                     each=move || channels.get()
-                    key=|c| c.id
+                    key=|c| (c.id, c.updated_at)
                     children=move |channel| {
                         let chan_id = channel.id;
                         let is_active = channel.is_enabled;
@@ -384,12 +447,31 @@ pub fn SettingsPage() -> impl IntoView {
                                     >
                                         "Send test alert"
                                     </button>
-                                    <button
-                                        class="text-xs text-sev-critical hover:brightness-125 transition-all"
-                                        on:click=move |_| on_delete_channel(chan_id)
-                                    >
-                                        "Delete"
-                                    </button>
+                                    <div class="flex items-center gap-3">
+                                        <button
+                                            class="text-xs text-ink-500 hover:text-slate-200 transition-colors"
+                                            on:click=move |_| on_toggle_channel(chan_id, !is_active)
+                                        >
+                                            {if is_active { "Disable" } else { "Enable" }}
+                                        </button>
+                                        {move || if pending_delete.get() == Some(chan_id) {
+                                            view! {
+                                                <span class="flex items-center gap-2 text-xs">
+                                                    <button class="text-sev-critical font-semibold" on:click=move |_| on_delete_channel(chan_id)>"Confirm delete"</button>
+                                                    <button class="text-ink-500" on:click=move |_| set_pending_delete.set(None)>"Cancel"</button>
+                                                </span>
+                                            }.into_any()
+                                        } else {
+                                            view! {
+                                                <button
+                                                    class="text-xs text-sev-critical hover:brightness-125 transition-all"
+                                                    on:click=move |_| set_pending_delete.set(Some(chan_id))
+                                                >
+                                                    "Delete"
+                                                </button>
+                                            }.into_any()
+                                        }}
+                                    </div>
                                 </div>
                             </div>
                         }

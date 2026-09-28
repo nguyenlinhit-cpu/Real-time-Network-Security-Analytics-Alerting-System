@@ -65,6 +65,7 @@ async fn test_multi_channel_alert_simulation() {
         password: None,
         from_email: "alerts@secnet.local".to_string(),
         to_email: "soc@secnet.local".to_string(),
+        security: backend::alerting::email::SmtpSecurity::None,
     };
     assert_eq!(email_ch.name(), "Security Operations Email");
     let email_res = email_ch.send(&alert).await;

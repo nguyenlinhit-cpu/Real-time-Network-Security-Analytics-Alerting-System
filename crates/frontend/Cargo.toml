@@ -21,6 +21,7 @@ web-sys = { version = "0.3", features = [
     "MessageEvent",
     "CloseEvent",
     "ErrorEvent",
+    "Event",
     "BinaryType",
     "Window",
     "Document",

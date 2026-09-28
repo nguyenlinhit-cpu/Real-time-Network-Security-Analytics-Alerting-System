@@ -1,53 +1,44 @@
-use dashmap::DashMap;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use axum::http::HeaderMap;
+use backend::middleware::resolve_client_ip;
+use std::net::IpAddr;
+
+fn headers(pairs: &[(&'static str, &str)]) -> HeaderMap {
+    let mut h = HeaderMap::new();
+    for (k, v) in pairs {
+        h.insert(*k, v.parse().unwrap());
+    }
+    h
+}
 
 #[test]
-fn test_rate_limiter_in_memory_sliding_window() {
-    let rate_limiter = Arc::new(DashMap::new());
-    let client_ip = "192.168.1.100";
-    let key = format!("ratelimit:{}:auth", client_ip);
-    let max_requests = 10;
-    let window = Duration::from_secs(60);
+fn forwarded_headers_are_ignored_from_untrusted_peers() {
+    // A client connecting directly from the Internet cannot choose its rate-limit identity.
+    let peer: IpAddr = "203.0.113.7".parse().unwrap();
+    let h = headers(&[("x-real-ip", "9.9.9.9"), ("x-forwarded-for", "8.8.8.8")]);
+    assert_eq!(resolve_client_ip(Some(peer), &h), peer);
+}
 
-    let now = Instant::now();
+#[test]
+fn forwarded_headers_are_used_behind_trusted_proxy() {
+    // nginx inside the docker network (private range) forwards the real client address.
+    let proxy: IpAddr = "172.18.0.5".parse().unwrap();
+    let h = headers(&[("x-real-ip", "198.51.100.23")]);
+    assert_eq!(
+        resolve_client_ip(Some(proxy), &h),
+        "198.51.100.23".parse::<IpAddr>().unwrap()
+    );
 
-    // 1. First 10 requests should succeed
-    for i in 1..=max_requests {
-        let mut entry = rate_limiter.entry(key.clone()).or_insert((now, 0));
-        let (window_start, count) = entry.value_mut();
+    // X-Forwarded-For: the right-most entry is the one appended by the trusted proxy.
+    let h = headers(&[("x-forwarded-for", "1.2.3.4, 198.51.100.99")]);
+    assert_eq!(
+        resolve_client_ip(Some(proxy), &h),
+        "198.51.100.99".parse::<IpAddr>().unwrap()
+    );
+}
 
-        if now.duration_since(*window_start) > window {
-            *window_start = now;
-            *count = 1;
-        } else {
-            *count += 1;
-        }
-
-        assert_eq!(*count, i);
-        assert!(*count <= max_requests);
-    }
-
-    // 2. 11th request should exceed the limit
-    {
-        let mut entry = rate_limiter.entry(key.clone()).or_insert((now, 0));
-        let (_, count) = entry.value_mut();
-        *count += 1;
-        assert!(
-            *count > max_requests,
-            "11th request must trigger rate limit exceed"
-        );
-    }
-
-    // 3. Different endpoint category (API) should have independent counter
-    let api_key = format!("ratelimit:{}:api", client_ip);
-    {
-        let mut entry = rate_limiter.entry(api_key.clone()).or_insert((now, 0));
-        let (_, count) = entry.value_mut();
-        *count = 1;
-        assert_eq!(
-            *count, 1,
-            "API endpoint counter must be separate from auth counter"
-        );
-    }
+#[test]
+fn garbage_forwarded_header_falls_back_to_peer() {
+    let proxy: IpAddr = "127.0.0.1".parse().unwrap();
+    let h = headers(&[("x-real-ip", "not-an-ip")]);
+    assert_eq!(resolve_client_ip(Some(proxy), &h), proxy);
 }
