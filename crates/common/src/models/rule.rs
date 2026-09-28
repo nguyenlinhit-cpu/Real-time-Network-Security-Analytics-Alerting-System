@@ -35,6 +35,8 @@ pub struct DetectionRule {
     pub time_window_seconds: i32,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    pub mitre_tactic: Option<String>,
+    pub mitre_technique: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
@@ -48,6 +50,8 @@ pub struct CreateRuleDto {
     pub is_enabled: Option<bool>,
     pub threshold_value: f64,
     pub time_window_seconds: i32,
+    pub mitre_tactic: Option<String>,
+    pub mitre_technique: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
@@ -60,4 +64,6 @@ pub struct UpdateRuleDto {
     pub is_enabled: Option<bool>,
     pub threshold_value: Option<f64>,
     pub time_window_seconds: Option<i32>,
+    pub mitre_tactic: Option<String>,
+    pub mitre_technique: Option<String>,
 }
