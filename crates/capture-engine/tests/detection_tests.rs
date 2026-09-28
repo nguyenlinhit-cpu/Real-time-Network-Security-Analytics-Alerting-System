@@ -171,8 +171,13 @@ fn test_syn_flood_detector_triggers_and_rejects_ack() {
         alert.is_some(),
         "SYN flood should trigger when threshold of 4 is reached"
     );
-    assert_eq!(alert.unwrap().severity, AlertSeverity::Critical);
+    let alert = alert.unwrap();
+    assert_eq!(alert.severity, AlertSeverity::Critical);
+    // Single dominant source: attribution is trustworthy.
+    assert_eq!(alert.src_ip, "10.0.0.2/32".parse().unwrap());
+    assert!(detector.last_alert_auto_blockable());
 }
+
 
 #[test]
 fn test_brute_force_detector_triggers_on_sensitive_ports() {
@@ -248,10 +253,10 @@ fn test_arp_spoof_detector_triggers_on_mac_change() {
         ))
         .is_none());
 
-    // Attacker spoofing MAC for 192.168.1.1
+    // Attacker sends a forged ARP reply claiming 192.168.1.1 (sender IP) is at its own MAC
     let alert = detector.evaluate(&make_event(
-        "192.168.1.200/32",
         "192.168.1.1/32",
+        "192.168.1.100/32",
         0,
         0,
         "ARP",
@@ -262,7 +267,26 @@ fn test_arp_spoof_detector_triggers_on_mac_change() {
         alert.is_some(),
         "ARP spoofing should trigger on MAC address change"
     );
-    assert_eq!(alert.unwrap().severity, AlertSeverity::Critical);
+    let alert = alert.unwrap();
+    assert_eq!(alert.severity, AlertSeverity::Critical);
+    assert!(alert.description.contains("aa:bb:cc:dd:ee:ff"));
+    // The claimed IP is the victim: must never be auto-blocked.
+    assert!(!detector.last_alert_auto_blockable());
+}
+
+#[test]
+fn test_arp_requests_from_different_hosts_are_not_spoofing() {
+    let mut detector = ArpSpoofDetector::new();
+    // Two hosts asking for the same gateway: different senders, different MACs -> no alert.
+    for (sender, mac) in [
+        ("192.168.1.10/32", "MAC:00:00:00:00:00:10"),
+        ("192.168.1.11/32", "MAC:00:00:00:00:00:11"),
+        ("192.168.1.10/32", "MAC:00:00:00:00:00:10"),
+    ] {
+        assert!(detector
+            .evaluate(&make_event(sender, "192.168.1.1/32", 0, 0, "ARP", mac, 42))
+            .is_none());
+    }
 }
 
 #[test]
@@ -302,36 +326,37 @@ fn test_dns_tunneling_detector_entropy() {
 #[test]
 fn test_zscore_anomaly_detector_detects_volume_spike() {
     let mut detector = ZScoreAnomalyDetector::new(2.5, 30);
+    let base = Utc::now() - chrono::Duration::seconds(60);
+    let at = |secs: i64, bytes: i64| {
+        let mut e = make_event("10.0.0.1/32", "10.0.0.2/32", 5000, 80, "TCP", "ACK", bytes);
+        e.time = base + chrono::Duration::seconds(secs);
+        e
+    };
 
-    // Train baseline with normal 100-byte packets
-    for _ in 0..20 {
-        assert!(detector
-            .evaluate(&make_event(
-                "10.0.0.1/32",
-                "10.0.0.2/32",
-                5000,
-                80,
-                "TCP",
-                "ACK",
-                100
-            ))
-            .is_none());
+    // 20 seconds of steady ~10 KB/s traffic (10 packets per second)
+    for sec in 0..20 {
+        for i in 0..10 {
+            assert!(
+                detector.evaluate(&at(sec, 900 + i * 20)).is_none(),
+                "steady traffic must not alert"
+            );
+        }
     }
 
-    // Massive sudden spike
-    let alert = detector.evaluate(&make_event(
-        "10.0.0.1/32",
-        "10.0.0.2/32",
-        5000,
-        80,
-        "TCP",
-        "ACK",
-        500_000,
-    ));
+    // A single large packet is NOT a volume anomaly on its own (was a false positive)
+    assert!(detector.evaluate(&at(20, 1500)).is_none());
+
+    // One second of bulk transfer (50x the usual volume)...
+    for _ in 0..10 {
+        assert!(detector.evaluate(&at(21, 50_000)).is_none());
+    }
+    // ...is reported once that second's bucket closes.
+    let alert = detector.evaluate(&at(22, 1000));
     assert!(
         alert.is_some(),
         "Z-Score anomaly detector should detect massive volume spike"
     );
+    assert!(alert.unwrap().description.contains("bytes/s"));
 }
 
 #[test]
@@ -447,14 +472,14 @@ async fn test_detection_engine_state_snapshot_and_restore() {
     let mut engine2 = DetectionEngine::new(tx);
     engine2.restore_state(&snapshot);
 
-    // Now attack engine2 with spoofed MAC for the same target IP
+    // Now attack engine3 with a forged ARP reply claiming the learned IP
     let (alert_tx2, mut alert_rx2) = mpsc::channel(100);
     let mut engine3 = DetectionEngine::new(alert_tx2);
     engine3.restore_state(&snapshot);
 
     engine3
         .process_event(&make_event(
-            "192.168.1.99/32",
+            "192.168.1.10/32",
             "192.168.1.1/32",
             0,
             0,
@@ -511,5 +536,177 @@ fn test_rule_config_dynamic_update() {
                 64
             ))
             .is_none());
+    }
+}
+
+#[test]
+fn test_syn_flood_distributed_sources_not_auto_blockable() {
+    let mut detector = SynFloodDetector::new(10, 5);
+    let mut alert = None;
+    for i in 0..10 {
+        let src = format!("198.51.100.{}/32", i + 1);
+        alert = detector.evaluate(&make_event(&src, "192.168.1.50/32", 40000, 80, "TCP", "SYN", 40));
+    }
+    let alert = alert.expect("distributed flood must still be detected");
+    assert!(alert.description.contains("distinct sources"));
+    assert!(
+        !detector.last_alert_auto_blockable(),
+        "no single source dominates: must not auto-block a random sender"
+    );
+}
+
+#[test]
+fn test_dns_tunneling_deduplicates_per_base_domain() {
+    let mut detector = DnsTunnelDetector::new(3.5, 20);
+    let mut alerts = 0;
+    for i in 0..15 {
+        let _ = i;
+        let flags = format!("DNS:{}.c2.tunnel-exfil.net", Uuid::new_v4().simple());
+        if detector
+            .evaluate(&make_event("192.168.1.188/32", "8.8.8.8/32", 50000, 53, "UDP", &flags, 120))
+            .is_some()
+        {
+            alerts += 1;
+        }
+    }
+    assert_eq!(alerts, 1, "one exfiltration session must produce a single alert");
+}
+
+fn rule_model(name: &str, severity: AlertSeverity, threshold: f64, window: i32) -> common::models::DetectionRule {
+    common::models::DetectionRule {
+        id: Uuid::new_v4(),
+        name: name.to_string(),
+        rule_type: common::models::RuleType::Threshold,
+        condition_json: serde_json::json!({}),
+        severity,
+        is_enabled: true,
+        threshold_value: threshold,
+        time_window_seconds: window,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        mitre_tactic: Some("Reconnaissance".to_string()),
+        mitre_technique: Some("T1595".to_string()),
+    }
+}
+
+async fn run_port_scan(engine: &mut capture_engine::detection::engine::DetectionEngine) {
+    for p in 1..=20 {
+        engine
+            .process_event(&make_event("10.9.9.9/32", "192.168.1.50/32", 40000, 1000 + p, "TCP", "SYN", 64))
+            .await;
+    }
+}
+
+#[tokio::test]
+async fn test_engine_applies_db_severity_and_disables_deleted_rules() {
+    use capture_engine::detection::engine::DetectionEngine;
+    let (tx, mut rx) = mpsc::channel(100);
+    let mut engine = DetectionEngine::new(tx);
+
+    // Port scan configured from the DB with a custom severity and MITRE mapping
+    let cfg = rule_model("Port Scan Detection", AlertSeverity::Low, 5.0, 10);
+    let cfg_id = cfg.id;
+    engine.apply_rule_configs(vec![cfg]);
+    run_port_scan(&mut engine).await;
+    let alert = rx.try_recv().expect("port scan alert expected");
+    assert_eq!(alert.rule_id, Some(cfg_id));
+    assert_eq!(alert.severity, AlertSeverity::Low, "severity must come from the DB rule");
+    assert_eq!(alert.mitre_technique.as_deref(), Some("T1595"));
+
+    // Rule deleted in the UI (DB synced without it): the detector must stop, instead of
+    // producing alerts with a dangling rule id.
+    let (tx2, mut rx2) = mpsc::channel(100);
+    let mut engine2 = DetectionEngine::new(tx2);
+    engine2.apply_rule_configs(vec![]);
+    run_port_scan(&mut engine2).await;
+    assert!(rx2.try_recv().is_err(), "deleted rule must not produce alerts");
+}
+
+#[tokio::test]
+async fn test_engine_executes_custom_rules() {
+    use capture_engine::detection::engine::DetectionEngine;
+    let (tx, mut rx) = mpsc::channel(100);
+    let mut engine = DetectionEngine::new(tx);
+
+    let mut custom = rule_model("Telnet burst", AlertSeverity::High, 5.0, 10);
+    custom.condition_json = serde_json::json!({"metric": "packet_rate", "group_by": "src_ip", "dst_port": 23});
+    let custom_id = custom.id;
+    engine.apply_rule_configs(vec![custom]);
+
+    for _ in 0..5 {
+        engine
+            .process_event(&make_event("10.1.2.3/32", "192.168.1.9/32", 40000, 23, "TCP", "ACK", 64))
+            .await;
+    }
+    let alert = rx.try_recv().expect("custom rule must fire");
+    assert_eq!(alert.rule_id, Some(custom_id));
+    assert_eq!(alert.severity, AlertSeverity::High);
+    assert!(alert.title.contains("Telnet burst"));
+}
+
+#[tokio::test]
+async fn test_simulator_covers_all_eight_detectors() {
+    use capture_engine::capture::simulator::{AttackScenario, TrafficSimulator};
+    use capture_engine::capture::PacketSource;
+    use capture_engine::detection::engine::DetectionEngine;
+    use std::collections::HashSet;
+
+    let (tx, mut rx) = mpsc::channel(10_000);
+    let mut engine = DetectionEngine::new(tx);
+    let mut sim = TrafficSimulator::new("sim0".to_string());
+
+    // 15 seconds of historical background traffic: baseline for the per-second volume detector
+    let now = Utc::now();
+    for s in 0..15i64 {
+        for _ in 0..20 {
+            let mut e = sim.generate_normal_event();
+            e.time = now - chrono::Duration::seconds(16 - s);
+            engine.process_event(&e).await;
+        }
+    }
+    // Make sure the gateway binding is known before the spoof
+    engine
+        .process_event(&make_event(
+            capture_engine::capture::simulator::GATEWAY_IP,
+            "192.168.1.100/32",
+            0,
+            0,
+            "ARP",
+            &format!("MAC:{}", capture_engine::capture::simulator::GATEWAY_MAC),
+            42,
+        ))
+        .await;
+
+    for (name, scenario) in AttackScenario::demo_rotation() {
+        sim.set_scenario(scenario);
+        let started = std::time::Instant::now();
+        while !sim.is_idle() && started.elapsed() < std::time::Duration::from_secs(20) {
+            let e = sim.next_event().await.unwrap();
+            engine.process_event(&e).await;
+            // Volume spike and beaconing are time based
+            if name == "volume_spike" || name == "beaconing" {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        }
+        // Close the traffic-volume bucket with one more second of normal traffic
+        let until = std::time::Instant::now() + std::time::Duration::from_millis(1100);
+        while std::time::Instant::now() < until {
+            let e = sim.next_event().await.unwrap();
+            engine.process_event(&e).await;
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
+    let mut titles = HashSet::new();
+    while let Ok(a) = rx.try_recv() {
+        titles.insert(a.mitre_technique.clone().unwrap_or_default());
+    }
+    for technique in ["T1046", "T1498", "T1110", "T1557", "T1071.004", "T1020", "T1498.001", "T1071"] {
+        assert!(
+            titles.contains(technique),
+            "scenario for {} produced no alert (got {:?})",
+            technique,
+            titles
+        );
     }
 }

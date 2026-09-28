@@ -317,8 +317,10 @@ impl PacketSource for TrafficSimulator {
             }
             AttackScenario::DnsTunneling { query_count } => {
                 self.finish_after(query_count);
-                let random_hex: String = (0..32)
-                    .map(|_| format!("{:x}", rng.gen_range(0..16)))
+                // Base32/36-style encoded chunk, as produced by DNS tunnelling tools.
+                const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
+                let encoded: String = (0..48)
+                    .map(|_| ALPHABET[rng.gen_range(0..ALPHABET.len())] as char)
                     .collect();
                 Some(self.event(
                     "192.168.1.188/32".parse().expect("valid literal IP"),
@@ -328,7 +330,7 @@ impl PacketSource for TrafficSimulator {
                     "UDP",
                     512,
                     1,
-                    format!("DNS:{}.c2.tunnel-exfil.net", random_hex),
+                    format!("DNS:{}.c2.tunnel-exfil.net", encoded),
                 ))
             }
             AttackScenario::TrafficVolumeSpike { multiplier } => {
