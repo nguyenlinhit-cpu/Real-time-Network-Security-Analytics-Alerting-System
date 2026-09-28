@@ -1,6 +1,6 @@
 services:
   timescaledb:
-    image: timescale/timescaledb:latest-pg15
+    image: timescale/timescaledb:2.14.2-pg15
     container_name: secnet_timescaledb
     restart: unless-stopped
     environment:
@@ -125,6 +125,9 @@ services:
       RUST_LOG: "info,capture_engine=debug"
     volumes:
       - capture_data:/data
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
     networks:
       - secnet_mesh
 

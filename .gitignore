@@ -5,3 +5,5 @@ deploy/nginx/certs/
 *.key
 *.crt
 secnet_rules_state.json
+dist/
+crates/frontend/dist/
