@@ -50,6 +50,7 @@ pub struct CreateNotificationChannelDto {
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct UpdateNotificationChannelDto {
+    #[validate(length(min = 2, max = 100))]
     pub name: Option<String>,
     pub r#type: Option<ChannelType>,
     pub config_json: Option<serde_json::Value>,

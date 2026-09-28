@@ -9,6 +9,8 @@ use uuid::Uuid;
 static X_REQUEST_ID: HeaderName = HeaderName::from_static("x-request-id");
 
 pub async fn correlation_id_middleware(mut request: Request, next: Next) -> Response {
+    crate::handlers::metrics::increment_http_requests();
+
     let request_id = request
         .headers()
         .get(&X_REQUEST_ID)

@@ -54,7 +54,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"]
 jsonwebtoken = "9.3"
 argon2 = "0.5"
 rand = "0.8"
-validator = { version = "0.18", features = ["derive"] }
+validator = { version = "0.20", features = ["derive"] }
 
 # Config & Env
 config = "0.14"

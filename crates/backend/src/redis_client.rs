@@ -1,24 +1,33 @@
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
-use tracing::{debug, info};
+use tracing::info;
+
+/// Every Redis round-trip (connect + write + read) must finish within this budget, so a hung
+/// Redis instance degrades to the in-memory fallbacks instead of stalling every API request.
+const REDIS_OP_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// Minimal RESP reply representation (only the reply types the commands below produce).
+#[derive(Debug, Clone, PartialEq)]
+pub enum RespValue {
+    Simple(String),
+    Integer(i64),
+    Bulk(Option<String>),
+    Error(String),
+}
 
 /// Lightweight, async RESP-compatible Redis client for distributed rate limiting and alert deduplication
 pub struct SimpleRedisClient {
     address: Option<String>,
     connection: Mutex<Option<BufReader<TcpStream>>>,
-    connected: AtomicBool,
 }
 
 impl SimpleRedisClient {
     pub fn new(address: Option<String>) -> Self {
-        let has_addr = address.is_some();
         Self {
             address,
             connection: Mutex::new(None),
-            connected: AtomicBool::new(has_addr),
         }
     }
 
@@ -32,6 +41,7 @@ impl SimpleRedisClient {
         let addr = self.address.as_ref()?;
         let stripped = addr.trim_start_matches("redis://");
         let host_port = stripped.split('/').next().unwrap_or(stripped);
+        let host_port = host_port.rsplit('@').next().unwrap_or(host_port);
         if host_port.contains(':') {
             Some(host_port.to_string())
         } else {
@@ -39,255 +49,145 @@ impl SimpleRedisClient {
         }
     }
 
-    /// Acquire or establish connection
-    async fn get_connection<'a>(
-        &'a self,
-        guard: &'a mut tokio::sync::MutexGuard<'_, Option<BufReader<TcpStream>>>,
-    ) -> Result<&'a mut BufReader<TcpStream>, String> {
-        if guard.is_none() {
-            let host_port = self
-                .get_host_port()
-                .ok_or_else(|| "Redis address not configured".to_string())?;
+    fn encode(args: &[&str]) -> Vec<u8> {
+        let mut out = format!("*{}\r\n", args.len()).into_bytes();
+        for a in args {
+            out.extend_from_slice(format!("${}\r\n", a.len()).as_bytes());
+            out.extend_from_slice(a.as_bytes());
+            out.extend_from_slice(b"\r\n");
+        }
+        out
+    }
 
-            match tokio::time::timeout(Duration::from_secs(2), TcpStream::connect(&host_port)).await
-            {
-                Ok(Ok(stream)) => {
-                    info!("Connected to distributed Redis instance at {}", host_port);
-                    **guard = Some(BufReader::new(stream));
-                    self.connected.store(true, Ordering::Relaxed);
+    async fn read_reply(reader: &mut BufReader<TcpStream>) -> Result<RespValue, String> {
+        let mut line = String::new();
+        let n = reader
+            .read_line(&mut line)
+            .await
+            .map_err(|e| format!("Read error from Redis: {}", e))?;
+        if n == 0 {
+            return Err("Redis closed the connection".to_string());
+        }
+        let line = line.trim_end_matches(['\r', '\n']);
+        let (prefix, rest) = line.split_at(1.min(line.len()));
+        match prefix {
+            "+" => Ok(RespValue::Simple(rest.to_string())),
+            "-" => Ok(RespValue::Error(rest.to_string())),
+            ":" => rest
+                .parse()
+                .map(RespValue::Integer)
+                .map_err(|e| format!("Invalid integer reply: {}", e)),
+            "$" => {
+                let len: i64 = rest
+                    .parse()
+                    .map_err(|e| format!("Invalid bulk length: {}", e))?;
+                if len < 0 {
+                    return Ok(RespValue::Bulk(None));
                 }
-                Ok(Err(e)) => {
-                    self.connected.store(false, Ordering::Relaxed);
-                    return Err(format!(
-                        "Failed to connect to Redis at {}: {}",
-                        host_port, e
-                    ));
-                }
-                Err(_) => {
-                    self.connected.store(false, Ordering::Relaxed);
-                    return Err(format!("Connection timeout to Redis at {}", host_port));
-                }
+                let mut buf = vec![0u8; len as usize + 2];
+                reader
+                    .read_exact(&mut buf)
+                    .await
+                    .map_err(|e| format!("Read error from Redis: {}", e))?;
+                buf.truncate(len as usize);
+                Ok(RespValue::Bulk(Some(String::from_utf8_lossy(&buf).into_owned())))
+            }
+            _ => Err(format!("Unexpected Redis reply: {}", line)),
+        }
+    }
+
+    /// Sends one command and reads its reply. Any failure drops the connection so the next call
+    /// reconnects cleanly instead of reading a stale, out-of-sync reply.
+    pub async fn command(&self, args: &[&str]) -> Result<RespValue, String> {
+        let host_port = self
+            .get_host_port()
+            .ok_or_else(|| "Redis address not configured".to_string())?;
+        let mut guard = self.connection.lock().await;
+
+        let result = tokio::time::timeout(REDIS_OP_TIMEOUT, async {
+            if guard.is_none() {
+                let stream = TcpStream::connect(&host_port)
+                    .await
+                    .map_err(|e| format!("Failed to connect to Redis at {}: {}", host_port, e))?;
+                info!("Connected to distributed Redis instance at {}", host_port);
+                *guard = Some(BufReader::new(stream));
+            }
+            let reader = guard.as_mut().expect("connection initialised above");
+            reader
+                .get_mut()
+                .write_all(&Self::encode(args))
+                .await
+                .map_err(|e| format!("Write error to Redis: {}", e))?;
+            Self::read_reply(reader).await
+        })
+        .await
+        .unwrap_or_else(|_| Err(format!("Redis operation timed out ({:?})", REDIS_OP_TIMEOUT)));
+
+        match result {
+            Ok(RespValue::Error(e)) => Err(format!("Redis error: {}", e)),
+            Ok(v) => Ok(v),
+            Err(e) => {
+                *guard = None;
+                Err(e)
             }
         }
-
-        Ok(guard.as_mut().unwrap())
     }
 
     /// Atomically increments a key and sets TTL on creation (distributed rate limiting)
     pub async fn incr_with_expire(&self, key: &str, ttl_seconds: u64) -> Result<i64, String> {
-        let mut guard = self.connection.lock().await;
-        let reader = match self.get_connection(&mut guard).await {
-            Ok(r) => r,
-            Err(e) => return Err(e),
+        let count = match self.command(&["INCR", key]).await? {
+            RespValue::Integer(n) => n,
+            other => return Err(format!("Unexpected INCR reply: {:?}", other)),
         };
-
-        // Command 1: INCR key
-        let cmd = format!("*2\r\n$4\r\nINCR\r\n${}\r\n{}\r\n", key.len(), key);
-        if let Err(e) = reader.get_mut().write_all(cmd.as_bytes()).await {
-            *guard = None;
-            return Err(format!("Write error to Redis: {}", e));
-        }
-
-        let mut line = String::new();
-        if let Err(e) = reader.read_line(&mut line).await {
-            *guard = None;
-            return Err(format!("Read error from Redis: {}", e));
-        }
-
-        let count: i64 = if let Some(stripped) = line.trim().strip_prefix(':') {
-            stripped
-                .trim()
-                .parse()
-                .map_err(|e| format!("Invalid INCR response: {}", e))?
-        } else {
-            *guard = None;
-            return Err(format!(
-                "Unexpected INCR response from Redis: {}",
-                line.trim()
-            ));
-        };
-
-        // If newly created counter (count == 1), set expiration TTL
         if count == 1 {
-            let ttl_str = ttl_seconds.to_string();
-            let expire_cmd = format!(
-                "*3\r\n$6\r\nEXPIRE\r\n${}\r\n{}\r\n${}\r\n{}\r\n",
-                key.len(),
-                key,
-                ttl_str.len(),
-                ttl_str
-            );
-            if let Err(e) = reader.get_mut().write_all(expire_cmd.as_bytes()).await {
-                *guard = None;
-                return Err(format!("Write EXPIRE error to Redis: {}", e));
-            }
-
-            let mut exp_line = String::new();
-            let _ = reader.read_line(&mut exp_line).await;
+            self.command(&["EXPIRE", key, &ttl_seconds.to_string()])
+                .await?;
         }
-
         Ok(count)
     }
 
     /// Sets key only if not exists with TTL (distributed alert deduplication / cooldown)
     /// Returns Ok(true) if newly set (i.e. NOT throttled), Ok(false) if key already exists (throttled)
     pub async fn set_nx_ex(&self, key: &str, val: &str, ttl_seconds: u64) -> Result<bool, String> {
-        let mut guard = self.connection.lock().await;
-        let reader = match self.get_connection(&mut guard).await {
-            Ok(r) => r,
-            Err(e) => return Err(e),
-        };
-
-        let ttl_str = ttl_seconds.to_string();
-        let cmd = format!(
-            "*6\r\n$3\r\nSET\r\n${}\r\n{}\r\n${}\r\n{}\r\n$2\r\nEX\r\n${}\r\n{}\r\n$2\r\nNX\r\n",
-            key.len(),
-            key,
-            val.len(),
-            val,
-            ttl_str.len(),
-            ttl_str
-        );
-
-        if let Err(e) = reader.get_mut().write_all(cmd.as_bytes()).await {
-            *guard = None;
-            return Err(format!("Write SET NX EX error to Redis: {}", e));
-        }
-
-        let mut line = String::new();
-        if let Err(e) = reader.read_line(&mut line).await {
-            *guard = None;
-            return Err(format!("Read SET NX EX error from Redis: {}", e));
-        }
-
-        let trimmed = line.trim();
-        if trimmed == "+OK" {
-            Ok(true) // Acquired slot
-        } else if trimmed == "$-1" {
-            Ok(false) // Already exists
-        } else {
-            debug!("SET NX EX unexpected response: {}", trimmed);
-            Ok(false)
+        match self
+            .command(&["SET", key, val, "EX", &ttl_seconds.to_string(), "NX"])
+            .await?
+        {
+            RespValue::Simple(s) if s == "OK" => Ok(true),
+            RespValue::Bulk(None) => Ok(false),
+            other => Err(format!("Unexpected SET NX reply: {:?}", other)),
         }
     }
 
     /// Checks if a key exists in Redis
     pub async fn exists(&self, key: &str) -> Result<bool, String> {
-        let mut guard = self.connection.lock().await;
-        let reader = match self.get_connection(&mut guard).await {
-            Ok(r) => r,
-            Err(e) => return Err(e),
-        };
-
-        let cmd = format!("*2\r\n$6\r\nEXISTS\r\n${}\r\n{}\r\n", key.len(), key);
-        if let Err(e) = reader.get_mut().write_all(cmd.as_bytes()).await {
-            *guard = None;
-            return Err(format!("Write EXISTS error to Redis: {}", e));
-        }
-
-        let mut line = String::new();
-        if let Err(e) = reader.read_line(&mut line).await {
-            *guard = None;
-            return Err(format!("Read EXISTS error from Redis: {}", e));
-        }
-
-        let trimmed = line.trim();
-        if let Some(stripped) = trimmed.strip_prefix(':') {
-            let val: i64 = stripped.parse().unwrap_or(0);
-            Ok(val > 0)
-        } else {
-            Ok(false)
+        match self.command(&["EXISTS", key]).await? {
+            RespValue::Integer(n) => Ok(n > 0),
+            other => Err(format!("Unexpected EXISTS reply: {:?}", other)),
         }
     }
 
     /// Sets key with TTL
     pub async fn set_ex(&self, key: &str, val: &str, ttl_seconds: u64) -> Result<(), String> {
-        let mut guard = self.connection.lock().await;
-        let reader = match self.get_connection(&mut guard).await {
-            Ok(r) => r,
-            Err(e) => return Err(e),
-        };
-
-        let ttl_str = ttl_seconds.to_string();
-        let cmd = format!(
-            "*5\r\n$3\r\nSET\r\n${}\r\n{}\r\n${}\r\n{}\r\n$2\r\nEX\r\n${}\r\n{}\r\n",
-            key.len(),
-            key,
-            val.len(),
-            val,
-            ttl_str.len(),
-            ttl_str
-        );
-
-        if let Err(e) = reader.get_mut().write_all(cmd.as_bytes()).await {
-            *guard = None;
-            return Err(format!("Write SET EX error to Redis: {}", e));
-        }
-
-        let mut line = String::new();
-        let _ = reader.read_line(&mut line).await;
-        Ok(())
+        self.command(&["SET", key, val, "EX", &ttl_seconds.max(1).to_string()])
+            .await
+            .map(|_| ())
     }
 
     /// Deletes a key from Redis
     pub async fn del(&self, key: &str) -> Result<bool, String> {
-        let mut guard = self.connection.lock().await;
-        let reader = match self.get_connection(&mut guard).await {
-            Ok(r) => r,
-            Err(e) => return Err(e),
-        };
-
-        let cmd = format!("*2\r\n$3\r\nDEL\r\n${}\r\n{}\r\n", key.len(), key);
-        if let Err(e) = reader.get_mut().write_all(cmd.as_bytes()).await {
-            *guard = None;
-            return Err(format!("Write DEL error to Redis: {}", e));
-        }
-
-        let mut line = String::new();
-        if let Err(e) = reader.read_line(&mut line).await {
-            *guard = None;
-            return Err(format!("Read DEL error from Redis: {}", e));
-        }
-
-        let trimmed = line.trim();
-        if let Some(stripped) = trimmed.strip_prefix(':') {
-            let val: i64 = stripped.parse().unwrap_or(0);
-            Ok(val > 0)
-        } else {
-            Ok(false)
+        match self.command(&["DEL", key]).await? {
+            RespValue::Integer(n) => Ok(n > 0),
+            other => Err(format!("Unexpected DEL reply: {:?}", other)),
         }
     }
 
     /// Gets integer value of key (e.g. for failed login counter)
     pub async fn get_int(&self, key: &str) -> Result<Option<i64>, String> {
-        let mut guard = self.connection.lock().await;
-        let reader = match self.get_connection(&mut guard).await {
-            Ok(r) => r,
-            Err(e) => return Err(e),
-        };
-
-        let cmd = format!("*2\r\n$3\r\nGET\r\n${}\r\n{}\r\n", key.len(), key);
-        if let Err(e) = reader.get_mut().write_all(cmd.as_bytes()).await {
-            *guard = None;
-            return Err(format!("Write GET error to Redis: {}", e));
-        }
-
-        let mut line = String::new();
-        if let Err(e) = reader.read_line(&mut line).await {
-            *guard = None;
-            return Err(format!("Read GET error from Redis: {}", e));
-        }
-
-        let trimmed = line.trim();
-        if trimmed == "$-1" {
-            Ok(None)
-        } else if trimmed.starts_with('$') {
-            let mut val_line = String::new();
-            let _ = reader.read_line(&mut val_line).await;
-            let num = val_line.trim().parse::<i64>().ok();
-            Ok(num)
-        } else {
-            Ok(None)
+        match self.command(&["GET", key]).await? {
+            RespValue::Bulk(Some(s)) => Ok(s.trim().parse().ok()),
+            RespValue::Bulk(None) => Ok(None),
+            other => Err(format!("Unexpected GET reply: {:?}", other)),
         }
     }
 }

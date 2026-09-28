@@ -1,508 +1,311 @@
-# Rà soát toàn diện SecNet — Lỗi cần fix, Chức năng bắt buộc & Chức năng có thể thêm
+# Rà soát SecNet (lần 2) — Kiểm tra lại toàn bộ tính năng
 
-**Nội dung:** Phần A — 56 lỗi cần fix · Phần B — chức năng có thể thêm · Phần C — 55 chức năng bắt buộc kèm hiện trạng · Lộ trình.
+> Commit được rà: `fb95773` (28/09/2026). Chỉ ghi nhận lỗi, **không sửa code**.
+> Bản rà trước (commit `734e38e`, 56 mục) vẫn còn trong lịch sử git: `git show fb95773:SECNET_REVIEW.md`.
 
-> Repo: [nguyenlinhit-cpu/Real-time-Network-Security-Analytics-Alerting-System](https://github.com/nguyenlinhit-cpu/Real-time-Network-Security-Analytics-Alerting-System) — commit `734e38e` (27/09/2026).
-> Cách rà: build thật toàn workspace, chạy test, chạy `cargo fmt --check` + `cargo clippy -D warnings` + `cargo audit` như CI; đọc toàn bộ handler backend, 8 detection rule, pipeline capture, **toàn bộ trang và component frontend**, docker-compose, Dockerfile, nginx. Frontend được type-check trên target native (môi trường rà chặn tải target WASM).
+## Cách kiểm tra
 
-## Tóm tắt nhanh
+1. **Build + CI cục bộ:** `cargo build --workspace`, `cargo test --workspace`, `cargo fmt --check`, `cargo clippy -D warnings`, `cargo audit`, `cargo check -p frontend --target wasm32-unknown-unknown`.
+2. **Chạy thật end-to-end:** dựng TimescaleDB `2.14.2-pg15` bằng Docker (mount `migrations/` giống `docker-compose.yml`), chạy `backend` và `capture-engine` (simulation, 200 pkt/s, khoảng 2 phút), gọi API bằng `curl` với 3 vai trò admin / analyst / viewer, nghe `/ws/alerts` và `/ws/traffic` bằng `websocat`, rồi đối chiếu với dữ liệu trong DB.
+3. **Đọc code:** toàn bộ handler backend, alerting, auth, middleware, Redis client, 8 detector, live capture, simulator, migrations, các trang và component frontend, Dockerfile, nginx, docker-compose.
 
-- ✅ Build thành công, **28/28 test pass**; frontend biên dịch sạch.
-- ❌ **CI fail 2/3 job**: `lint` (227 chỗ lệch format, ~12 cảnh báo clippy) và `security-audit` (`cargo audit` báo 2 lỗ hổng: `idna` qua `validator 0.18`, `rsa`).
-- ❌ **Vấn đề lớn nhất: pipeline real-time chưa được nối end-to-end.** Capture engine phát hiện tấn công và ghi vào bảng `alerts`, nhưng backend không có gì đọc lại để đẩy lên WebSocket hay gửi Email/Telegram/Webhook. Traffic cũng không bao giờ được ghi vào `traffic_events`. Dashboard hiện chỉ đang hiển thị dữ liệu seed.
-- ❌ **Có 2 lỗ hổng mức Critical:** ai cũng tự đăng ký được tài khoản **Admin**, và WebSocket không yêu cầu xác thực.
-- ❌ `docker compose up` trên máy sạch **sẽ không chạy được** (healthcheck backend luôn fail, nginx TLS không có cert).
-- ❌ **Frontend:** biểu đồ "Live throughput" hiển thị **số liệu giả**; trang Settings lưu cấu hình kênh sai key nên kênh tạo từ UI không bao giờ gửi được; không dùng refresh token nên sau 24h giao diện "chết" mà không tự đăng xuất.
-- 📋 Trong 55 chức năng bắt buộc (Phần C): **5 đã chạy đúng, 22 có nhưng lỗi, 28 chưa có**.
+Các mục ghi **[Đã chạy thử]** là lỗi tái hiện được khi chạy thật. Các mục còn lại phát hiện qua đọc code.
 
----
+## Tóm tắt
 
-# PHẦN A — LỖI CẦN FIX
-
-## A1. 🔴 Chức năng lõi chưa chạy end-to-end
-
-**1. Alert không bao giờ tới WebSocket / Email / Telegram / Webhook**
-- `capture-engine` và `backend` là 2 process riêng; cầu nối duy nhất là `INSERT INTO alerts`.
-- Trong backend **không có chỗ nào gửi vào `alert_broadcast` / `traffic_broadcast`** (chỉ có `subscribe()` trong `handlers/ws.rs`).
-- `AlertDispatcher::dispatch()` **chỉ được gọi từ endpoint test kênh** (`handlers/notifications.rs:245`).
-- → Toast, chuông báo động, Email/Telegram/Webhook chỉ hoạt động khi bấm "Test".
-- **Cách sửa:** trigger Postgres `AFTER INSERT ON alerts` → `pg_notify('new_alert', ...)` + backend `PgListener` → broadcast + dispatch. Hoặc dùng Redis Streams (`RedisStreamBrokerSink` trong `pipeline.rs` đã viết sẵn nhưng chưa dùng).
-
-**2. Không ghi traffic vào `traffic_events`**
-- Chỉ có `INSERT` trong file seed. Capture engine chỉ chạy detection, không lưu event.
-- → Trang Traffic, Device history, top talkers, continuous aggregate, compression đều chạy trên dữ liệu seed tĩnh; `/ws/traffic` không bao giờ phát.
-- **Cách sửa:** batch insert (UNNEST/COPY) mỗi 100ms–1s trong capture engine, đồng thời publish lên bus cho backend.
-
-**3. Phát hiện ARP Spoofing và DNS Tunneling chỉ chạy được với simulator**
-- 2 detector đọc `MAC:` / `DNS:` trong trường `flags`, nhưng `live.rs` chỉ parse IPv4/IPv6 (bỏ qua frame ARP) và không bao giờ ghi MAC hay tên miền DNS vào `flags`.
-- → Ở chế độ live, 2 rule này **không bao giờ kích hoạt**.
-- **Cách sửa:** parse `EtherTypes::Arp` (`ArpPacket`), parse DNS query từ payload UDP/53.
-
-**4. DNS Tunneling bị vô hiệu hoá sau khi load cấu hình từ DB**
-- `update_config()` gán `entropy_threshold = threshold_value` = **50.0** (giá trị seed), trong khi Shannon entropy của một nhãn tên miền tối đa chỉ ≈ 5–6.
-- → Điều kiện `entropy >= 50` không bao giờ đúng.
-
-**5. Tên rule trong DB không khớp với code → 4/8 rule không cấu hình được từ UI**
-| DB (seed) | Code `name()` |
+| Hạng mục | Kết quả |
 |---|---|
-| `SSH/RDP Brute-Force Detection` | `Brute-force Attack Detection` |
-| `ARP Spoofing Detection` | `ARP Spoofing / Poisoning Detection` |
-| *(không có)* | `ICMP Flood / Smurf Attack Detection` |
-| *(không có)* | `C2 Beaconing / Periodic Callback Detection` |
-- → Bật/tắt/sửa ngưỡng các rule này trên UI không có tác dụng; alert của chúng có `rule_id = NULL`.
-- **Cách sửa:** khớp theo `id` hoặc thêm cột `key` cố định (vd `port_scan`), thêm migration seed cho 2 rule mới.
+| Build workspace (native + WASM) | ✅ Thành công |
+| Test | ✅ 30/30 pass. Tuy vậy không có test nào gọi handler với DB thật, nên lỗi 500 ở mục 1 không bị phát hiện. |
+| `cargo fmt --check`, `cargo clippy -D warnings` | ✅ Sạch (job `lint` đã hết lỗi) |
+| `cargo audit` | ❌ **1 lỗ hổng** `idna 0.5.0` (RUSTSEC-2024-0421, kéo vào qua `validator 0.18`), nên job `security-audit` trên CI vẫn fail |
+| `docker compose up --build` | ❌ **Image backend không build được** (mục 2) |
 
-**6. Sửa rule trên UI không áp dụng real-time**
-- `reload_rules_from_db()` chỉ gọi **1 lần lúc khởi động**. Cột `severity` và `condition_json` trong DB bị bỏ qua hoàn toàn (severity hard-code trong từng detector). Rule mới tạo từ UI không làm gì cả vì engine chỉ có 8 detector cố định.
-- **Cách sửa:** `LISTEN rules_changed` hoặc reload định kỳ; đọc severity từ DB.
-
-**7. Frontend mở WebSocket mới mỗi 5 giây, không đóng cái cũ**
-- `ws/client.rs`: vòng `loop` tạo `WebSocket::new()` mỗi 5s mà không kiểm tra kết nối cũ còn sống; closure bị `forget()` → rò bộ nhớ.
-- → Mỗi tab mở ~12 kết nối/phút cho mỗi stream. Khi pipeline (mục 1) được nối, mỗi alert sẽ hiện **lặp N lần**, chuông kêu chồng nhau, server cạn tài nguyên.
-- **Cách sửa:** chỉ reconnect trong `onclose`, có exponential backoff, giữ 1 instance.
-
-**8. CI fail ở 2/3 job**
-- Job `lint`: `cargo fmt --all -- --check` báo 227 diff → chạy `cargo fmt --all`; `cargo clippy -- -D warnings` báo ~12 cảnh báo (5 `impl Default` có thể derive trong `common`, `strip_prefix` thủ công, `is_multiple_of`...) → chạy `cargo clippy --fix`.
-- Job `security-audit`: `cargo audit` báo 2 lỗ hổng (xem mục 55).
-
-## A2. 🔴 Lỗ hổng bảo mật nghiêm trọng
-
-**9. Leo thang đặc quyền: ai cũng tự đăng ký được Admin**
-- `/api/auth/register` public, nhận trường `role` từ client: `payload.role.unwrap_or(UserRole::Viewer)`. Trang Login còn có sẵn dropdown **"Admin — full configuration"**.
-- **Cách sửa:** bỏ `role` khỏi `CreateUserDto` public (luôn là Viewer) hoặc tắt đăng ký mở; thêm API quản lý user chỉ cho Admin.
-
-**10. WebSocket `/ws/alerts` và `/ws/traffic` không xác thực**
-- `ws_routes` không nằm trong `protected_routes`, handler không kiểm tra token → ai kết nối được tới server đều nghe được luồng sự cố và traffic nội bộ. (Bản fix trước giới hạn `?token=` cho `/ws` nhưng route `/ws` thực ra không qua middleware.)
-- **Cách sửa:** verify token (và `token_type == "access"`, chưa revoke) trong handler trước `on_upgrade`; frontend gửi `?token=`.
-
-**11. Lộ secret của kênh thông báo cho mọi user**
-- `GET /api/notifications/channels` không có RBAC và trả nguyên `config_json` (Telegram `bot_token`, webhook URL...). Kết hợp mục 9 → bất kỳ ai cũng đọc được.
-- **Cách sửa:** chỉ Admin, mask secret khi trả về, mã hoá secret at-rest.
-
-**12. Bypass rate limit & chống brute-force bằng header `X-Forwarded-For`**
-- Backend lấy **giá trị đầu tiên** của XFF; nginx dùng `$proxy_add_x_forwarded_for` (nối thêm vào header client gửi) → giá trị đầu do attacker kiểm soát. Đổi XFF mỗi request = brute-force không giới hạn. Khi không có header, mọi client dùng chung bucket `127.0.0.1`. Port 8080 còn expose thẳng ra ngoài, bỏ qua nginx.
-- **Cách sửa:** dùng `X-Real-IP` từ proxy tin cậy / lấy hop cuối / `ConnectInfo<SocketAddr>`; không publish port 8080.
-
-**13. CORS thực tế là wildcard `*`**
-- Code đọc `CORS_ALLOWED_ORIGINS` (số nhiều), nhưng `docker-compose.yml` và `.env.example` đặt `CORS_ALLOWED_ORIGIN` (số ít) → không tìm thấy → rơi vào nhánh `allow_origin(Any)`.
-
-**14. JWT secret trong `.env.example` vượt qua được kiểm tra production**
-- Giá trị `default_super_secret_jwt_key_32_bytes_long_change_in_production` không bắt đầu bằng `super_secret` và dài ≥ 32 → check trong `main.rs` cho qua. README hướng dẫn `cp .env.example .env`.
-- **Cách sửa:** chặn mọi giá trị chứa `change_in_production`/`default`/`super_secret`, hoặc tự sinh secret ngẫu nhiên lần chạy đầu.
-
-**15. Redis và Postgres expose ra host không có mật khẩu mạnh**
-- Redis `6379` publish ra host, không `requirepass` → ai vào được host có thể xoá khoá thu hồi token, reset lockout/rate limit. Postgres `5432` publish với `postgres/postgres`.
-- `SimpleRedisClient` không hỗ trợ `AUTH` (URL `redis://:pass@host` bị parse sai) → hiện không thể đặt mật khẩu.
-
-**16. Logout không thu hồi refresh token**
-- `logout` chỉ revoke `jti` của access token; refresh token (7 ngày) vẫn dùng được để lấy access token mới sau khi "đăng xuất".
-- **Cách sửa:** gửi refresh token kèm request logout và revoke luôn, hoặc quản lý theo "token family".
-
-**17. Auto-block có thể tự chặn hạ tầng của chính mình**
-- Alert SYN Flood: `src_ip` = IP gửi gói SYN thứ N (ngẫu nhiên/giả mạo được). Alert ARP: `src_ip` = bất kỳ ai gửi gói tới IP đó. Không có allowlist cho gateway/DNS/server nội bộ, không có bước xác nhận.
-- → Attacker giả mạo IP nguồn = gateway sẽ khiến hệ thống tự chặn gateway.
-- **Cách sửa:** allowlist bắt buộc, chỉ auto-block với rule có độ tin cậy cao, yêu cầu phê duyệt (human-in-the-loop), block có TTL.
-
-**18. Dò username qua thời gian phản hồi (timing attack)**
-- User không tồn tại → trả lỗi ngay, không chạy Argon2 → nhanh hơn rõ rệt so với sai mật khẩu. README khẳng định chống user enumeration.
-- **Cách sửa:** verify với một dummy hash khi không tìm thấy user.
-
-**19. Khoá tài khoản bị lạm dụng để DoS**
-- Lockout chỉ theo username → ai cũng khoá được tài khoản `admin` bằng 5 lần nhập sai.
-- **Cách sửa:** khoá theo (username, IP), tăng dần độ trễ, CAPTCHA.
-
-**20. CSV/Formula injection ở `/api/reports/export`**
-- `title`/`description` chứa dữ liệu do attacker ảnh hưởng (vd tên miền DNS) nhưng không escape ký tự đầu `= + - @` → mở bằng Excel có thể chạy công thức. Endpoint cũng không có RBAC.
-
-**21. SSRF qua DNS rebinding ở webhook**
-- `validate_webhook_url()` resolve DNS để kiểm tra, sau đó `reqwest` resolve **lần nữa** khi gửi → domain đổi IP giữa 2 lần sẽ lọt. Host SMTP của kênh Email không được validate.
-- **Cách sửa:** pin IP đã kiểm tra bằng `ClientBuilder::resolve()`.
-
-**22. Telegram dùng `parse_mode: Markdown` không escape**
-- Nội dung có `_ * [` sẽ làm Telegram trả 400 → mất tin nhắn âm thầm; attacker có thể chèn link vào cảnh báo gửi SOC.
-
-**23. Các điểm yếu phụ về auth/web**
-- Token thiếu `token_type` mặc định thành `"access"` (`#[serde(default)]`), token thiếu `jti` không thu hồi được → nên bắt buộc đủ claim.
-- Access token sống 24h là dài với hệ thống SOC → nên 15 phút + refresh.
-- JWT vẫn nằm trong `localStorage`; CSP cho phép `'unsafe-inline'` và Tailwind Play CDN (không dành cho production) → nếu có XSS thì mất token.
-- `X-Request-ID` do client gửi được dùng nguyên → giả mạo log.
-- `/metrics` public, mỗi lần gọi chạy 4 `COUNT(*)`.
-
-## A3. 🟠 Độ chính xác phát hiện (false positive / false negative)
-
-**24. Brute-force báo nhầm với phiên SSH bình thường**
-- Đếm **mọi gói < 300 byte** tới port 22 → gõ phím trong SSH (gói nhỏ) cũng tính là "attempt"; vài giây là ra alert.
-- **Cách sửa:** chỉ đếm kết nối mới (SYN không ACK) theo nguồn; tốt nhất tích hợp log xác thực (auth.log).
-
-**25. Port Scan báo nhầm và bỏ sót**
-- Đếm mọi gói chứ không chỉ SYN → server trả lời client qua nhiều cổng ephemeral bị coi là "quét cổng". Chỉ phát hiện quét dọc theo cặp (src, dst); bỏ sót quét ngang (1 cổng nhiều host) và quét phân tán.
-
-**26. SYN Flood dùng ngưỡng tuyệt đối, không xét tỉ lệ half-open**
-- Web server bận có thể vượt ngưỡng hợp lệ; alert Critical → auto-block client vô tội. Nên so SYN với SYN-ACK/ACK hoàn tất.
-
-**27. Z-Score không đúng như mô tả**
-- README: theo từng IP. Code: 1 cửa sổ toàn cục 100 gói gần nhất, đo **kích thước từng gói** → cứ có gói 1500 byte giữa các gói ACK 64 byte là "bất thường". Cooldown toàn cục che mất bất thường thật.
-- **Cách sửa:** gom bytes theo host theo bucket thời gian, baseline riêng từng host.
-
-**28. Beaconing báo nhầm với lưu lượng UDP định kỳ**
-- Tính mọi gói UDP → VoIP/RTP, NTP, QUIC, DNS đều "tuần hoàn" → báo C2. Mô tả nói "external destination" nhưng code không kiểm tra.
-
-**29. ARP detector lật trạng thái**
-- Sau khi báo, ghi đè MAC tin cậy bằng MAC của attacker → khi MAC thật trả lời lại sẽ báo tiếp (flapping); DHCP cấp lại IP cũng ra alert Critical.
-
-## A4. 🟠 Hiệu năng & độ ổn định
-
-**30. Map trong bộ nhớ không bao giờ dọn**
-- HashMap của mọi detector (theo IP/cặp IP), `rate_limiter`, `failed_logins`, `revoked_tokens`, cache throttler: chỉ thêm key, không xoá key. Với IP giả mạo (hoặc XFF giả, mục 12) → bộ nhớ tăng tới OOM.
-- **Cách sửa:** cache có TTL (`moka`) hoặc job dọn định kỳ.
-
-**31. Detector sụp đổ đúng lúc bị tấn công**
-- SYN Flood / Port Scan lưu từng timestamp trong `Vec` và `retain` mỗi gói → O(n²) khi flood.
-- **Cách sửa:** đếm theo bucket / ring buffer.
-
-**32. Pipeline đơn luồng**
-- Một `tokio::Mutex` bọc cả engine, giữ lock qua `alert_tx.send().await`; persister chạy `nft`/`iptables` + insert DB tuần tự → nghẽn ngược tới thread capture → rớt gói.
-- **Cách sửa:** chia worker theo hash `src_ip`, xử lý batch.
-
-**33. Redis client tự viết có nhiều rủi ro**
-- 1 kết nối TCP dùng chung sau Mutex cho mọi request (mỗi API request ≥ 2 round-trip nối tiếp nhau). Không có timeout đọc → Redis treo thì **toàn bộ API treo**. `INCR` rồi `EXPIRE` không atomic → crash giữa chừng = key vĩnh viễn (khoá tài khoản/rate limit vĩnh viễn). Một số reply bị bỏ qua (`let _ = read_line`) có thể lệch protocol.
-- **Cách sửa:** dùng crate `redis`/`fred` + pool (`deadpool`/`bb8`), `SET NX EX` + `INCR` hoặc Lua/MULTI.
-
-**34. Query nặng**
-- Dashboard tính tổng trên **toàn bộ** `traffic_events` mỗi lần load, không dùng `traffic_hourly_rollup`; "alert đang mở" đếm cả alert đã resolve.
-- Lọc traffic dùng `host(src_ip) = $3` → không dùng được index; phân trang OFFSET sâu.
-- `/api/alerts` cố định `LIMIT 100`, không lọc/phân trang phía server.
-
-**35. Live capture lỗi âm thầm**
-- Không có quyền raw socket → `LiveCapture::new()` vẫn trả `Ok`, thread thoát, engine ngồi im. Log ghi "Switching to simulation" nhưng không chuyển.
-- File state ghi không atomic (crash giữa chừng → JSON hỏng → mất state); chỉ bắt SIGINT, còn `docker stop` gửi SIGTERM.
-
-**36. Kênh thông báo luôn báo "thành công"**
-- Mọi lỗi (non-2xx, lỗi mạng) đều trả `Ok(())` → audit log luôn `SUCCESS`, không retry/backoff/dead-letter.
-- `test_channel` bỏ qua `id` (gửi tới **tất cả** kênh), và đi qua throttler → test lần 2 trong 60s bị chặn nhưng vẫn báo thành công.
-
-**37. Email không dùng được với SMTP thật**
-- `builder_dangerous` = SMTP plaintext (không TLS/STARTTLS, trái README); `username/password` luôn `None`; địa chỉ gửi hard-code → không gửi được qua Gmail/Office365/Mailtrap.
-
-**38. Slack không hoạt động**
-- Kênh Slack dùng `WebhookChannel` gửi nguyên JSON `Alert`, trong khi Slack yêu cầu `{"text": ...}` → bị từ chối.
-
-## A5. 🟡 Triển khai & vận hành
-
-**39. `docker compose up` không chạy trên máy sạch**
-- Healthcheck backend dùng `wget`/`curl`, nhưng image `debian:bookworm-slim` **không có cả hai** → backend luôn unhealthy → `frontend`, `nginx-proxy`, `capture-engine` (đều `depends_on: service_healthy`) không bao giờ start.
-- `nginx-proxy` tự sinh cert bằng `openssl`, nhưng `nginx:alpine` **không có openssl CLI** → bỏ qua âm thầm → nginx không start vì thiếu file cert (cert đã bị xoá khỏi repo).
-
-**40. Capture engine trong Docker không giám sát/chặn được mạng thật**
-- Chạy trên bridge network → chỉ sniff được veth của chính container. Không có `NET_RAW`/`NET_ADMIN`, image runtime không cài `nftables`/`iptables`, table/set `inet filter secnet_blocklist` chưa được tạo, và iptables trong container chỉ ảnh hưởng namespace của container.
-- **Cách sửa:** `network_mode: host`, `cap_add: [NET_RAW, NET_ADMIN]`, cài nftables, script bootstrap table/set.
-
-**41. Blocklist không nhất quán giữa DB và firewall**
-- `blocked_until` không được thực thi (không có job hết hạn) → rule firewall tồn tại vĩnh viễn. Block/unblock thủ công trên UI không chạm tới firewall. Block lại IP đã có → vi phạm UNIQUE → lỗi 500.
-
-**42. Migration không áp dụng cho DB đang chạy**
-- Migration chỉ chạy qua `docker-entrypoint-initdb.d` (lần init đầu); backend không gọi `sqlx::migrate!` → migration `0012` không bao giờ được áp vào volume đã có dữ liệu.
-
-**43. Build phụ thuộc mạng**
-- `utoipa-swagger-ui` tải Swagger UI từ GitHub trong `build.rs` → build lỗi khi offline/sau proxy (đã gặp khi rà). Bật feature `vendored` của `utoipa-swagger-ui` 7.1.
-
-**44. Vệ sinh repo & cấu hình**
-- Thư mục `crates/frontend/dist/` (file build `.wasm`, `.js`) bị commit vào git.
-- Image `timescale/timescaledb:latest-pg15` không pin version.
-- Capture engine chạy root cả khi ở chế độ simulation; không có `REDIS_URL`.
-- `DEMO_SCENARIO` và `SIMULATION_PACKETS_PER_SEC` bị đọc rồi bỏ qua (vòng lặp cố định 5 kịch bản, sleep 50ms ≈ 20 gói/s); kịch bản `volume_spike` không bao giờ chạy trong demo.
-
-**45. README lỗi thời**
-- Vẫn ghi 6 rule / 18 test (thực tế 8 rule / 28 test), Z-score "theo từng IP", SMTP có TLS, Telegram MarkdownV2 — đều không đúng với code. Chưa nhắc Redis, nginx TLS, `ENVIRONMENT=production`. Có 7 link dạng `file:///home/linh/...` bị hỏng trên GitHub.
-
-## A6. 🟠 Frontend (Leptos)
-
-**46. Frontend không dùng refresh token và không xử lý hết hạn đăng nhập**
-- Login/Register chỉ lưu access token, **bỏ luôn `refresh_token`**; không có chỗ nào gọi `/api/auth/refresh`; không bắt lỗi 401.
-- App coi là "đã đăng nhập" chỉ vì còn token trong `localStorage` → sau 24h giao diện vẫn hiện như bình thường nhưng mọi dữ liệu trống/lỗi, không tự chuyển về trang Login. Cơ chế refresh + rotation vừa làm ở backend không được dùng.
-- **Cách sửa:** lưu refresh token, bọc request: gặp 401 → gọi refresh → thử lại 1 lần → thất bại thì đăng xuất.
-
-**47. Biểu đồ "Live network throughput" hiển thị số liệu giả**
-- `components/traffic_chart.rs` khởi tạo mảng cứng `[120, 180, 140, 220, 310, 280, 350, 420, 390, 500]`, mỗi lần cập nhật đẩy vào `(tổng_bytes % 600 + 100)` — không phải lưu lượng thật.
-- Ô "Current throughput … B/s" thực ra là **tổng byte cộng dồn** từ lúc mở trang (chỉ tăng, không chia theo giây).
-- → Với đồ án, đây là điểm dễ bị hội đồng bắt lỗi nhất: số liệu trình bày như dữ liệu thật nhưng là số bịa.
-- **Cách sửa:** tính bytes/giây theo cửa sổ trượt từ luồng traffic, hoặc lấy từ continuous aggregate; bỏ dữ liệu khởi tạo cứng.
-
-**48. Trang Settings không cấu hình được kênh thông báo**
-- Form chỉ có **1 ô URL cho mọi loại kênh** và lưu với key `"url"`, trong khi backend đọc `endpoint_url` (Webhook), `webhook_url` (Slack), `bot_token`/`chat_id` (Telegram), `smtp_host`/`smtp_port`/`to_email` (Email).
-- → Kênh tạo từ UI **không bao giờ gửi được**; Email và Telegram không có ô nhập thông tin. Vì key sai nên bước kiểm tra SSRF lúc tạo kênh cũng bị bỏ qua.
-- Secret ký hard-code `"secnet_sign_key"` cho mọi kênh (và không được dùng ở đâu); `min_severity` cố định High; nhãn "ACTIVE" luôn hiện dù kênh đã tắt; không có chức năng sửa kênh; `config_json` hiển thị thô (lộ secret).
-- **Cách sửa:** form riêng theo từng loại kênh, dùng đúng tên key, dùng chung struct cấu hình giữa frontend và backend (crate `common`).
-
-**49. Nút thao tác hiện sai quyền, lỗi bị nuốt im lặng**
-- Viewer vẫn thấy nút Acknowledge/Resolve; Analyst thấy trang Blocklist với nút chặn/gỡ IP, nhưng API chỉ cho Admin → bấm không có phản hồi (lỗi 403 bị bỏ qua).
-- Xử lý alert, chặn IP, tạo/sửa rule, export CSV đều chỉ xử lý nhánh `if let Ok(...)` hoặc `let _ =` → người dùng tưởng đã chặn IP nhưng thực tế chưa.
-- **Cách sửa:** ẩn/khoá nút theo role; hiện toast lỗi cho mọi thao tác thất bại.
-
-**50. Giao diện không tự làm mới dữ liệu**
-- Alerts, traffic, số liệu dashboard chỉ tải **1 lần** khi đăng nhập, không polling. Vì WebSocket chưa có dữ liệu (mục 1), giao diện đứng yên cho tới khi F5.
-
-**51. Lọc/tìm kiếm chỉ trên dữ liệu đã tải về**
-- Trang Alerts lọc trên 100 alert đầu tiên; trang Traffic lọc trên 50 event gần nhất — dù API `/api/traffic` đã hỗ trợ lọc theo thời gian, IP, protocol.
-
-**52. Không có routing theo URL**
-- `leptos_router` được khai báo trong `Cargo.toml` nhưng không dùng; điều hướng bằng signal `active_tab` → F5 luôn quay về Dashboard, nút Back của trình duyệt không hoạt động, không gửi được link tới 1 alert cụ thể.
-
-**53. Dùng `js_sys::eval` để tải CSV và phát âm thanh**
-- Nội dung CSV (có phần dữ liệu do attacker ảnh hưởng) được nhúng vào chuỗi JavaScript rồi `eval`. Hiện đã escape nhưng đây là pattern rủi ro, và buộc CSP phải cho phép `unsafe-eval` (nếu áp CSP chặt cho frontend thì 2 chức năng này sẽ hỏng).
-- **Cách sửa:** `web_sys::Blob` + `Url::create_object_url` cho CSV; `web_sys::AudioContext` cho âm thanh.
-
-**54. Thiếu thao tác quản trị trên UI**
-- Không có nút xoá rule (API có), không sửa kênh thông báo, không đánh dấu thiết bị tin cậy, không hiển thị thời hạn chặn IP; thời hạn chặn cố định 24h.
-
-## A7. 🟠 Thư viện phụ thuộc & kiểm thử
-
-**55. `cargo audit` báo 2 lỗ hổng → job `security-audit` trên CI sẽ fail**
-| Crate | Mã | Vấn đề | Đến từ | Cách xử lý |
-|---|---|---|---|---|
-| `idna 0.5.0` | RUSTSEC-2024-0421 | Chấp nhận nhãn Punycode không hợp lệ (ảnh hưởng validate email/domain) | `validator 0.18` | Nâng `validator` lên ≥ 0.19 (dùng `idna 1.x`) |
-| `rsa 0.9.10` | RUSTSEC-2023-0071 (5.9 Medium) | Marvin Attack — lộ khoá qua timing | `sqlx-mysql` (chỉ có trong `Cargo.lock`, không được biên dịch vì chỉ dùng Postgres) | Không có bản sửa; thêm `.cargo/audit.toml` bỏ qua mã này kèm lý do |
-- Thêm 3 cảnh báo thư viện không còn được bảo trì: `paste` và `proc-macro-error2` (qua Leptos 0.7), `proc-macro-error` (qua `utoipa 4` và `validator 0.18`) → nâng `utoipa` lên 5.x, cân nhắc Leptos 0.8.
-
-**56. Test gọi Internet thật và đang "khoá" hành vi sai**
-- `alert_multichannel_simulation_test` gửi request thật tới `93.184.216.34` (example.com) và `api.telegram.org` → test chậm (~5s), phụ thuộc mạng, fail trong môi trường chặn Internet.
-- Các test này **assert `is_ok()` khi gửi thất bại** — tức là đang khẳng định lỗi ở mục 36 (nuốt lỗi) là đúng. Khi sửa mục 36, các test này sẽ fail.
-- **Cách sửa:** dùng mock server (`wiremock`), assert gửi thất bại trả `Err` và có retry.
-
-> **Giới hạn của lần rà:** không build được bản WASM vì môi trường rà chặn tải target `wasm32-unknown-unknown`. Frontend đã được type-check trên target native: biên dịch sạch, crate `frontend` không có cảnh báo clippy riêng. `trunk build` chưa được kiểm chứng.
+**5 lỗi nặng nhất:**
+1. Mọi API `/api/rules` trả **HTTP 500**, nên trang Rules không dùng được.
+2. Dockerfile backend thiếu thư mục `migrations/`, nên `docker compose up --build` lỗi biên dịch.
+3. Khoảng **42% traffic bị mất** khi ghi DB, do cột `flags VARCHAR(20)` quá ngắn cho DNS.
+4. Mỗi alert được đẩy **2 lần** qua WebSocket (pg_notify bị gọi 2 lần).
+5. Xoá một rule thì detector vẫn chạy, và **mọi alert của rule đó bị mất** do lỗi khoá ngoại.
 
 ---
 
-# PHẦN B — CHỨC NĂNG CÓ THỂ THÊM
+# PHẦN A — LỖI CHỨC NĂNG NGHIÊM TRỌNG (🔴)
 
-## B1. Hoàn thiện lõi IDS
-- **Event bus** (Redis Streams / NATS / Kafka) giữa capture và backend; backend consume → WebSocket + dispatcher.
-- **Flow aggregation** kiểu NetFlow (5-tuple, thời điểm đầu/cuối, bytes, packets) thay vì lưu từng gói → giảm dung lượng hàng trăm lần.
-- **Parser giao thức:** ARP, DHCP, DNS (query, rcode, NXDOMAIN), HTTP (Host, URI, User-Agent), TLS (SNI, JA3/JA4), SSH banner.
-- **Nguồn dữ liệu ngoài:** collector NetFlow/IPFIX/sFlow, import Zeek/Suricata EVE JSON, syslog (log xác thực cho brute-force chính xác), upload PCAP để phân tích offline.
-- **Capture hiệu năng cao:** BPF filter, nhiều interface, AF_PACKET v3 / eBPF-XDP.
-- **Rule engine tổng quát:** rule định nghĩa trong DB bằng DSL (điều kiện, ngưỡng, group_by, cửa sổ), hỗ trợ **Sigma**, tương thích signature Suricata/Snort, YARA cho payload.
-- **Hot reload rule** qua `LISTEN/NOTIFY`.
-- **Allowlist / suppression** theo IP, subnet, port, từng rule; cửa sổ bảo trì (maintenance window).
+### 1. Toàn bộ API Rules trả 500 — [Đã chạy thử]
+- `DetectionRule` (`crates/common/src/models/rule.rs`) có 2 trường `mitre_tactic` và `mitre_technique`, nhưng mọi câu `SELECT`/`RETURNING` trong `crates/backend/src/handlers/rules.rs` (dòng 30, 62, 104, 154, 174) **không lấy 2 cột này**. `sqlx::FromRow` báo `ColumnNotFound("mitre_tactic")`.
+- Hậu quả khi chạy thật:
+  - `GET /api/rules` và `GET /api/rules/:id` trả 500, nên trang Rules trống (frontend nuốt lỗi).
+  - `PATCH /api/rules/:id` trả 500 ngay ở bước đọc `_existing`, nên **không sửa, bật hay tắt được rule nào**.
+  - `POST /api/rules` **vẫn INSERT vào DB** nhưng trả 500 và **không ghi audit log**. Người dùng tưởng thất bại nên bấm lại, và lần sau gặp lỗi trùng tên (`name UNIQUE`).
+- Ngoài ra `create_rule` và `update_rule` bỏ qua `mitre_tactic`/`mitre_technique` trong DTO, nên không đặt được MITRE qua API.
 
-## B2. Rule phát hiện mới
-- Quét ngang, quét phân tán, UDP scan, stealth scan (FIN/NULL/Xmas).
-- DNS: NXDOMAIN flood, tên miền do DGA sinh, DNS amplification, bản ghi TXT bất thường.
-- **Lateral movement:** host nội bộ kết nối nhiều host nội bộ qua SMB/RDP/WinRM/SSH.
-- **Exfiltration:** lượng upload ra ngoài vượt baseline, upload tới đích hiếm gặp.
-- Thiết bị lạ xuất hiện, rogue DHCP, MAC flooding, dịch vụ mới mở cổng.
-- Kết nối tới IP/domain độc hại (threat intel), Tor exit node.
-- Bất thường TLS (cert tự ký/hết hạn, JA3 hiếm), credential plaintext (FTP/Telnet/HTTP Basic).
-- UDP flood, amplification (NTP/memcached/SSDP), HTTP flood/Slowloris.
-- Geo-anomaly: kết nối từ quốc gia chưa từng thấy.
-- **ML/thống kê:** baseline theo từng host có tính mùa vụ (giờ trong ngày, ngày trong tuần), EWMA, Isolation Forest/autoencoder huấn luyện offline.
+### 2. `docker compose up --build` fail: image backend không biên dịch được — [Đã chạy thử]
+- `crates/backend/src/main.rs:39` dùng `sqlx::migrate!("../../migrations")`. Macro này nhúng migration **lúc biên dịch**, nhưng `crates/backend/Dockerfile` chỉ `COPY` `Cargo.toml`, `Cargo.lock`, `crates`, `.sqlx` mà **không copy `migrations/`**.
+- Tái hiện với đúng build context đó: `error canonicalizing migration directory .../migrations: No such file or directory`.
 
-## B3. Threat intelligence & làm giàu dữ liệu
-- Feed: AbuseIPDB, Spamhaus DROP, FireHOL, Feodo Tracker, URLhaus; tích hợp MISP/OpenCTI qua STIX/TAXII.
-- GeoIP/ASN (MaxMind GeoLite2), reverse DNS, WHOIS.
-- Ngữ cảnh tài sản: chủ sở hữu, mức quan trọng, tag → tính **risk score** cho alert.
-- Gắn **MITRE ATT&CK** (tactic/technique) cho từng rule và alert.
+### 3. Mất ~42% traffic khi ghi vào `traffic_events` — [Đã chạy thử]
+- Cột `flags` là `VARCHAR(20)` (`migrations/20260101000005_...sql:14`), trong khi DNS event ghi `flags = "DNS:<tên miền>"` (thường dài hơn 20 ký tự).
+- Mỗi batch là một câu `INSERT` duy nhất (`crates/capture-engine/src/main.rs`, `flush_traffic_batch`), nên **chỉ cần 1 event DNS dài là cả batch 100 event bị huỷ**.
+- Số đo thực tế: 250 batch lỗi, **19.086 / 45.300 event bị mất**.
+- Ở chế độ live, gần như batch nào cũng có truy vấn DNS, nên phần lớn traffic sẽ không được lưu. Trang Traffic, lịch sử thiết bị, top talkers và alert→traffic đều thiếu dữ liệu.
 
-## B4. Quy trình SOC / quản lý sự cố
-- Gom alert thành **incident/case** (tương quan theo nguồn/thời gian), giao việc, bình luận, timeline, đính kèm bằng chứng.
-- Workflow trạng thái, SLA (MTTA/MTTR), chính sách leo thang, lịch trực.
-- Deduplicate kèm bộ đếm ("đã thấy 1.234 lần"), snooze, đánh dấu false positive để tinh chỉnh ngưỡng.
-- Trang **Threat Hunting**: ngôn ngữ truy vấn, lưu truy vấn, pivot theo IP/host.
-- **Ghi PCAP quanh thời điểm alert** (ring buffer N giây trước/sau) phục vụ điều tra.
-- Ghi chú, tag, thao tác hàng loạt.
+### 4. Alert bị đẩy 2 lần qua WebSocket — [Đã chạy thử]
+- Trigger `trigger_notify_new_alert` (`migrations/...013...sql:7`) đã gọi `pg_notify('new_alert')` sau mỗi INSERT. `spawn_alert_persister` (`crates/capture-engine/src/detection/engine.rs:304`) lại gọi `pg_notify('new_alert')` thêm một lần nữa, trong một transaction khác nên Postgres không gộp.
+- Đo được **56 message WS cho 28 alert** (mỗi alert đúng 2 lần).
+- Hậu quả:
+  - Toast và âm báo động kêu 2 lần.
+  - Danh sách alert trên UI có bản trùng. `<For key=alert.id>` gặp key trùng nên render lỗi.
+  - `dispatch()` chạy 2 lần mỗi alert (lần 2 chỉ bị chặn nhờ throttler).
 
-## B5. Phản ứng tự động (SOAR-lite)
-- **Playbook:** điều kiện → hành động (chặn IP, gửi thông báo, tạo ticket, cô lập host).
-- Tích hợp firewall: nftables, pfSense/OPNsense, MikroTik, FortiGate, security group trên cloud.
-- Bước phê duyệt trước khi chặn, block có TTL tự hết hạn, allowlist bảo vệ hạ tầng.
-- Ticket/on-call: Jira, ServiceNow, GLPI, PagerDuty, Opsgenie.
-- Kênh chat đúng định dạng: Slack, Microsoft Teams, Discord, Zalo OA.
-- Webhook ký **HMAC** để bên nhận xác thực; retry có backoff; dead-letter queue.
+### 5. Xoá rule thì alert của rule đó bị mất hoàn toàn — [Đã chạy thử]
+- `reload_rules_from_db()` chỉ cập nhật detector nào **còn** trong DB. Detector của rule đã xoá vẫn chạy với `rule_id` cũ.
+- `INSERT INTO alerts` bị lỗi `violates foreign key constraint "alerts_rule_id_fkey"`, nên alert **không được lưu, không lên WS, không gửi thông báo**. Chỉ có một dòng WARN trong log.
+- Hệ quả: nút "Delete rule" trên UI **không tắt được detector**, và còn làm mất cảnh báo.
 
-## B6. Người dùng & xác thực
-- Trang **quản lý user** cho Admin (tạo, khoá, đổi role, reset mật khẩu).
-- 2FA (TOTP / WebAuthn), SSO (OIDC/SAML), LDAP/Active Directory.
-- Quản lý phiên (xem/thu hồi phiên đang hoạt động), chính sách mật khẩu, quên mật khẩu qua email.
-- Phân quyền chi tiết hơn 3 role; **API key / service account** cho tích hợp.
-- Multi-tenant / multi-site (mỗi site một sensor).
-- Trang xem **audit log** có lọc/export; audit log chống sửa (hash chain).
+### 6. ARP Spoofing không bao giờ kích hoạt (cả simulator lẫn live) — [Đã chạy thử]
+- `arp_spoof.rs:71` dùng `event.dst_ip` (IP **đích** của gói ARP) làm khoá, nhưng lại ghép với MAC của **người gửi** (`live.rs` ghi `MAC:<sender_hw_addr>`). Phải là ánh xạ *sender IP → sender MAC*.
+- **Simulator:** kịch bản ARP luôn gửi cùng MAC giả `de:ad:be:ef:00:01`, nên lần đầu detector "học" MAC giả là MAC hợp lệ (lưu vào `rules_state.json`), và các lần sau không còn gì khác biệt. Kết quả: **0 alert ARP** sau nhiều vòng demo. Baseline còn bị đầu độc vĩnh viễn qua file state.
+- **Live:** hai máy khác nhau cùng hỏi ARP một IP (ví dụ cùng hỏi gateway) cũng bị coi là "IP đổi MAC". Alert mức Critical được sinh ra, auto-block **chặn máy hợp lệ**.
+- `ip_to_mac` không bao giờ được cập nhật hay dọn. Một thiết bị đổi MAC hợp lệ (thay card mạng, DHCP cấp lại) sẽ bị báo động mỗi 30 giây mãi mãi.
 
-## B7. Dashboard & trải nghiệm
-- Bộ chọn khoảng thời gian, drill-down, tuỳ chỉnh tần suất refresh.
-- **Bản đồ quan hệ mạng** (ai nói chuyện với ai), Sankey, bản đồ địa lý.
-- Heatmap giờ × ngày, phân bố giao thức theo thời gian (dùng continuous aggregate).
-- Trang chi tiết alert: traffic liên quan, timeline, ATT&CK, gợi ý xử lý.
-- Browser Notification API; tuỳ chỉnh âm thanh theo severity.
-- Dashboard/widget tự sắp xếp và lưu.
-- Đa ngôn ngữ (VI/EN); Tailwind build-time thay CDN.
+### 7. Auto-block chặn sai IP — [Đã chạy thử]
+- SYN Flood đếm theo **đích**, nhưng alert lấy `src_ip` của **gói cuối cùng** (`syn_flood.rs:107`). Khi Port Scan (cũng gửi SYN) chạy cùng lúc, IP của máy quét lọt vào alert SYN Flood.
+- Thực tế: `10.0.0.99` (máy Port Scan) bị auto-block với lý do *"SYN Flood"*.
+- Với SYN flood thật (src giả mạo hoặc phân tán), hệ thống sẽ chặn một IP ngẫu nhiên, có thể là IP hợp lệ. Kẻ tấn công lợi dụng được để khiến hệ thống tự chặn đối tác.
 
-## B8. Báo cáo & tuân thủ
-- Báo cáo định kỳ tự động (ngày/tuần, PDF/HTML qua email): top attacker, top mục tiêu, MTTR, xu hướng.
-- Export CSV an toàn, JSON, PDF, STIX.
-- Ánh xạ yêu cầu tuân thủ (ISO 27001, PCI DSS về log), cấu hình thời gian lưu trữ trên UI.
+### 8. Frontend không gửi request logout lên server
+- `crates/frontend/src/api/client.rs:71`: `.map(|r| r.send())` chỉ tạo future mà **không `.await`**, nên request `/api/auth/logout` không bao giờ được gửi.
+- Access token và refresh token **không bị thu hồi** sau khi bấm Đăng xuất (phía server thu hồi đúng khi gọi trực tiếp; đã chạy thử).
+- WebSocket đang mở cũng không bị đóng khi logout, nên vẫn nhận alert.
 
-## B9. Giám sát chính hệ thống & vận hành
-- Metrics Prometheus thật (crate `metrics`): packets/s, tỉ lệ rớt gói, độ trễ xử lý rule, độ sâu hàng đợi, alert theo rule, độ trễ ghi DB; kèm dashboard Grafana.
-- OpenTelemetry tracing xuyên suốt capture → backend.
-- Trang **sức khoẻ sensor** (heartbeat, rớt gói, version).
-- Log JSON có cấu trúc; đẩy log về Loki/ELK.
-- Validate cấu hình khi khởi động (fail fast).
-- Backup DB, HA (Postgres replication, Redis Sentinel).
-- Helm chart / manifest Kubernetes, systemd unit cho sensor chạy bare-metal.
-- TLS thật bằng Let's Encrypt (Caddy/certbot).
+### 9. Frontend không dùng refresh token, hết hạn là "chết"
+- `try_refresh_token()` được viết nhưng **không có chỗ nào gọi**. Không có xử lý HTTP 401.
+- Sau 24 giờ mọi API lỗi nhưng UI không báo và không tự đăng xuất. WS reconnect bằng token hết hạn nên thất bại mãi.
 
-## B10. Chất lượng & kiểm thử
-- Integration test với Postgres/Redis thật (testcontainers); **test end-to-end**: simulator tấn công → alert xuất hiện trên WebSocket.
-- **Replay PCAP từ dataset chuẩn** (CIC-IDS2017, UNSW-NB15) để đo precision/recall/tỉ lệ false positive từng rule — rất giá trị cho phần đánh giá của đồ án.
-- Benchmark (`criterion`) đo throughput packets/s; fuzz parser gói tin (`cargo-fuzz`).
-- Test frontend (`wasm-bindgen-test`, Playwright).
-- Dependabot/Renovate, `cargo-deny` (license + advisory), SBOM, quét image (Trivy), ký image.
-- Bổ sung endpoint `/api/reports/export` vào OpenAPI; version hoá API (`/api/v1`).
-
-## B11. Kiến trúc mở rộng
-- Nhiều sensor gửi về trung tâm (đăng ký sensor, mTLS).
-- Backend stateless scale ngang: fan-out WebSocket qua Redis pub/sub (hiện `broadcast` channel nằm trong process nên mỗi instance chỉ phục vụ client của riêng nó).
-- Chia detection theo hash `src_ip` cho nhiều worker/node.
-- Lưu trữ lạnh (S3/Parquet) cho dữ liệu cũ, tiered storage của TimescaleDB.
-
-## B12. Hướng mở rộng khác
-- **IPv6:** phát hiện giả mạo Router Advertisement, NDP spoofing (tương đương ARP spoofing trên IPv6).
-- **Đóng gói:** đọc tag VLAN (802.1Q), bóc tunnel GRE/VXLAN để thấy traffic bên trong.
-- **Wi‑Fi:** phát hiện deauth attack, rogue AP, evil twin.
-- **Traffic mã hoá:** phân tích dựa trên đặc trưng flow (kích thước, nhịp gói) mà không cần giải mã.
-- **Trích file** truyền qua HTTP/SMB, tra hash trên VirusTotal.
-- **Deception:** honeypot / honeytoken (canary) — mọi kết nối tới đều đáng nghi, gần như không báo nhầm.
-- **Tương quan lỗ hổng:** lấy kết quả Nmap/OpenVAS để ưu tiên alert nhắm vào máy có lỗ hổng thật.
-- **Giám sát băng thông** (không chỉ bảo mật): ứng dụng/user dùng nhiều nhất.
-- **AI hỗ trợ:** LLM tóm tắt sự cố, giải thích alert bằng tiếng Việt, gợi ý xử lý; hỏi dữ liệu bằng ngôn ngữ tự nhiên.
-- **Rule as code:** import/export rule YAML/JSON, quản lý bằng Git.
-- **Plugin** detector tuỳ chỉnh (ví dụ WASM plugin).
-- **Sao lưu/khôi phục** toàn bộ cấu hình.
-- **Cập nhật threat intel offline** cho môi trường không có Internet.
-- **Tuân thủ Việt Nam:** che dữ liệu cá nhân trong log/alert theo Nghị định 13/2023/NĐ-CP.
-- **Ứng dụng di động / push notification** cho người trực.
+### 10. Thao tác alert không cập nhật trên giao diện
+- `alerts_table.rs:162` dùng `<For key=|alert| alert.id>`. Khi Acknowledge/Resolve, phần tử được thay bằng bản mới **cùng id**. Leptos giữ nguyên hàng cũ nên badge trạng thái và nút **không đổi** cho tới khi tải lại trang.
+- Lỗi (403 do alert đã giao cho analyst khác, 500…) bị nuốt im lặng (`if let Ok(...)`).
 
 ---
 
-# PHẦN C — CHỨC NĂNG BẮT BUỘC PHẢI CÓ
+# PHẦN B — BẢO MẬT (🔴/🟠)
 
-**Tiêu chí "bắt buộc":** thiếu chức năng đó thì hệ thống (1) không làm được đúng việc nó tuyên bố — phát hiện và cảnh báo theo thời gian thực, (2) không an toàn để triển khai, hoặc (3) không chứng minh được là hoạt động đúng. Các chức năng ở Phần B không nằm trong bảng này là "nên có", không bắt buộc.
+### 11. `POST /api/sensor/heartbeat` không cần xác thực — [Đã chạy thử]
+- Route nằm trong `system_routes` (`routes.rs:168`). Bất kỳ ai cũng ghi hoặc ghi đè được trạng thái sensor (đã chèn thử sensor `fake` thành công).
+- Kẻ tấn công có thể giả heartbeat `healthy` cho sensor đã chết, hoặc làm rác bảng.
 
-**Hiện trạng** (theo code commit `734e38e`): ✅ đã có và chạy đúng · ⚠️ có nhưng lỗi hoặc thiếu một phần · ❌ chưa có. Cột "Mục" trỏ tới lỗi tương ứng ở Phần A.
+### 12. Lộ secret kênh thông báo cho Viewer/Analyst — [Đã chạy thử]
+- `mask_sensitive_config` chỉ che các key chứa `token|password|secret|key`, và chỉ ở cấp 1.
+- **Slack `webhook_url`** (bản thân URL là secret) và **object lồng nhau** (ví dụ `headers.Authorization`) **không bị che**. Đã thấy URL Slack đầy đủ và `Bearer abc` khi gọi bằng tài khoản analyst.
 
-## C1. Thu thập dữ liệu
+### 13. Khoá tài khoản bị lạm dụng và bị vượt qua dễ dàng — [Đã chạy thử]
+- Khoá theo **chuỗi username người dùng nhập**. Gửi 5 lần sai mật khẩu cho `analyst` là tài khoản này bị khoá 15 phút, kể cả khi sau đó nhập đúng mật khẩu (tấn công DoS).
+- Đăng nhập bằng **email** (`analyst@secnet.local`) của chính tài khoản đang bị khoá thì **vẫn vào được**, vì bộ đếm tách biệt. Kẻ dò mật khẩu có gấp đôi số lần thử.
 
-| # | Chức năng bắt buộc | Vì sao bắt buộc | Hiện trạng | Mục |
-|---|---|---|---|---|
-| 1 | Bắt gói trên interface thật của máy/mạng cần giám sát | Không có dữ liệu thật thì mọi thứ phía sau vô nghĩa | ⚠️ Có code, nhưng trong Docker chỉ thấy traffic của chính container | 40 |
-| 2 | Parse IPv4/IPv6, TCP/UDP/ICMP | Nền tảng cho mọi rule | ✅ | — |
-| 3 | Parse ARP và DNS | Rule ARP Spoofing và DNS Tunneling cần | ❌ | 3 |
-| 4 | Loại trừ traffic quản trị của chính hệ thống (DB, Redis, API) | Tránh tự phát hiện chính mình và vòng lặp ghi dữ liệu | ❌ | — |
-| 5 | Lưu traffic (dạng flow) vào TimescaleDB theo batch | Dashboard, điều tra, báo cáo đều dựa vào đây | ❌ | 2 |
-| 6 | Kênh truyền sự kiện capture → backend | Để alert/traffic tới được UI và kênh thông báo | ❌ | 1 |
-| 7 | Hàng đợi có giới hạn + đo tỉ lệ rớt gói | IDS phải biết khi nào nó đang "mù" | ⚠️ Có hàng đợi giới hạn, không đo rớt gói | 32 |
-| 8 | Giới hạn bộ nhớ trạng thái (TTL, dọn key) | Không bị attacker làm tràn RAM | ❌ | 30, 31 |
+### 14. Bypass rate-limit bằng header giả — [Đã chạy thử]
+- `rate_limit.rs:17` tin `X-Real-IP`/`X-Forwarded-For` do client gửi.
+- Backend lắng nghe trực tiếp ở `127.0.0.1:8080`, và frontend `:3000` chuyển tiếp `/api`. Chỉ cần đổi `X-Real-IP` mỗi request là giới hạn 10 req/phút cho `/api/auth/login` không còn tác dụng (12/12 request đều được xử lý).
+- Map `rate_limiter`, `failed_logins`, `revoked_tokens` và cache throttler **không bao giờ được dọn**. Với IP giả ngẫu nhiên, bộ nhớ tăng vô hạn.
 
-## C2. Phát hiện
+### 15. Token JWT lộ trong log
+- WebSocket truyền `?token=<JWT>` trên URL. nginx (`deploy/nginx/nginx.conf`, dùng log mặc định) ghi **toàn bộ URI kèm token** vào access log.
+- Khi mạng lỗi, `reqwest::Error` in kèm URL. Với Telegram, URL chứa **bot token** (`/bot<TOKEN>/sendMessage`), và lỗi này được ghi `warn!` ra log (`telegram.rs`).
+- Backend và capture-engine log `DATABASE_URL` **kèm mật khẩu** lúc khởi động (`backend/src/main.rs:35`, `capture-engine/src/main.rs:79`).
 
-| # | Chức năng bắt buộc | Vì sao bắt buộc | Hiện trạng | Mục |
-|---|---|---|---|---|
-| 9 | Các rule cơ bản chạy đúng trên dữ liệu thật (Port Scan, SYN Flood, Brute-force, ARP, DNS Tunneling, Volume Anomaly) | Là chức năng chính của hệ thống | ⚠️ Có nhưng báo nhầm nhiều, 2 rule không chạy ở chế độ live, DNS bị vô hiệu | 3, 4, 24–29 |
-| 10 | Sửa rule trên UI được áp dụng ngay, kể cả severity | README tuyên bố "điều chỉnh theo thời gian thực" | ❌ | 5, 6 |
-| 11 | Allowlist / suppression theo IP, subnet, rule | Không có thì analyst bị ngập báo nhầm và bỏ qua cảnh báo thật | ❌ | 17 |
-| 12 | Gộp/giảm alert trùng (dedup, cooldown) | Chống "bão cảnh báo" khi bị DDoS | ⚠️ Có throttler nhưng nằm ở dispatcher chưa được nối | 1 |
-| 13 | Đo độ chính xác từng rule (replay PCAP / dataset chuẩn) | Không đo thì không chứng minh được hệ thống phát hiện đúng | ❌ | B10 |
+### 16. Kiểm tra token WS không nhất quán
+- `ws.rs:31` chỉ kiểm tra `revoked_tokens` trong bộ nhớ local, **không kiểm tra Redis** như `is_token_revoked()`. Khi chạy nhiều instance, token đã logout ở instance khác vẫn mở WS được.
+- WS đã mở thì không bao giờ kiểm tra lại token (hết hạn hay bị thu hồi vẫn nhận dữ liệu).
 
-## C3. Cảnh báo
+### 17. Blocklist nhận giá trị nguy hiểm, không có tác dụng thật — [Đã chạy thử]
+- `duration_seconds` rất lớn làm **panic** `TimeDelta::seconds out of bounds` (`blocklist.rs:70`). Server không sập (tokio bắt panic) nhưng client nhận kết nối đứt, không có thông báo lỗi.
+- `duration_seconds` âm được chấp nhận và tạo bản ghi đã hết hạn ngay.
+- Chặn được `0.0.0.0/0` (toàn bộ Internet) mà không có cảnh báo hay xác nhận.
+- `blocked_until` **không được áp dụng ở đâu**: không có job dọn, firewall không gỡ rule sau 2 giờ, API vẫn trả bản ghi đã hết hạn. Chặn thủ công qua UI chỉ ghi DB, không đẩy xuống firewall.
+- Auto-block chạy `iptables`/`nft` **bên trong container capture-engine** (mạng bridge), nên không chặn được gì trên host. Bảng `inet filter secnet_blocklist` không được tạo ở đâu. Mỗi lần chặn lại chèn thêm một rule `iptables` trùng.
 
-| # | Chức năng bắt buộc | Vì sao bắt buộc | Hiện trạng | Mục |
-|---|---|---|---|---|
-| 14 | Lưu alert vào DB | Làm bằng chứng, điều tra, báo cáo | ✅ | — |
-| 15 | Đẩy alert real-time lên dashboard | Tên hệ thống là "Real-time" | ❌ | 1, 7 |
-| 16 | Ít nhất 1 kênh ngoài gửi được thật (Email có TLS + đăng nhập, hoặc Telegram) | Người trực không ngồi nhìn dashboard 24/7 | ⚠️ Telegram có code; Email không TLS, không đăng nhập; cả hai chưa được nối | 1, 22, 37 |
-| 17 | Retry khi gửi lỗi + ghi đúng trạng thái gửi | Không được mất cảnh báo âm thầm | ❌ | 36 |
-| 18 | Cấu hình đầy đủ từng loại kênh (Email, Telegram, Webhook) từ giao diện | Admin không thể sửa DB bằng tay để thêm kênh | ❌ Form lưu sai key, thiếu ô nhập | 48 |
-
-## C4. Điều tra & xử lý sự cố
-
-| # | Chức năng bắt buộc | Vì sao bắt buộc | Hiện trạng | Mục |
-|---|---|---|---|---|
-| 19 | Danh sách alert lọc + phân trang phía server | Khi có hàng nghìn alert, `LIMIT 100` là không dùng được | ❌ | 34 |
-| 20 | Trang chi tiết alert kèm traffic liên quan | Analyst cần ngữ cảnh để quyết định | ❌ | — |
-| 21 | Quy trình Acknowledge → Resolve, ghi người xử lý | Phân công, tránh 2 người xử lý 1 sự cố | ✅ | — |
-| 22 | Ghi audit log | Truy vết hành động quản trị | ✅ | — |
-| 23 | Trang xem audit log cho Admin | Có ghi mà không xem được thì không có tác dụng | ❌ | — |
-| 24 | Chặn IP: DB và firewall đồng bộ, tự hết hạn, allowlist hạ tầng, có bước phê duyệt | Chặn sai = tự gây sự cố cho mạng của mình | ⚠️ Có ghi DB và gọi lệnh firewall, nhưng không đồng bộ, không hết hạn, không allowlist | 17, 40, 41 |
-| 25 | Xuất báo cáo an toàn | Báo cáo cho quản lý | ⚠️ Có CSV nhưng dính formula injection, không RBAC | 20 |
-| 26 | Giao diện báo lỗi rõ ràng và chỉ hiện thao tác đúng quyền | Người dùng tưởng đã chặn IP/xử lý alert nhưng thực tế thất bại | ❌ | 49 |
-
-## C5. Bảo mật của chính hệ thống
-
-| # | Chức năng bắt buộc | Vì sao bắt buộc | Hiện trạng | Mục |
-|---|---|---|---|---|
-| 27 | Không cho tự đăng ký role cao; Admin quản lý user (tạo, khoá, đổi role) | Hệ thống bảo mật mà ai cũng thành Admin được | ❌ | 9 |
-| 28 | Xác thực mọi endpoint, kể cả WebSocket | Luồng alert/traffic là dữ liệu nhạy cảm | ⚠️ REST có, WebSocket không | 10 |
-| 29 | RBAC cho dữ liệu nhạy cảm + mã hoá secret kênh thông báo | Tránh lộ bot token, mật khẩu SMTP | ❌ | 11 |
-| 30 | Rate limit và khoá tài khoản dựa trên IP tin cậy | Chống brute-force vào chính hệ thống | ⚠️ Có nhưng bypass được | 12, 19 |
-| 31 | Thu hồi token khi logout (cả refresh token), access token ngắn hạn | Mất token không bị dùng lại | ⚠️ Chỉ thu hồi access token, token sống 24h | 16, 23 |
-| 32 | Frontend tự gia hạn phiên bằng refresh token, tự đăng xuất khi hết hạn | Access token ngắn hạn chỉ dùng được khi có cơ chế này | ❌ | 46 |
-| 33 | 2FA cho tài khoản Admin | Admin điều khiển được firewall | ❌ | B6 |
-| 34 | Không dùng secret mặc định; Redis/Postgres có mật khẩu và không public | Cấu hình mặc định phải an toàn | ⚠️ Có check JWT nhưng bypass được; Redis/Postgres public | 14, 15 |
-| 35 | CORS whitelist hoạt động đúng | Chặn web lạ gọi API | ⚠️ Thực tế đang là `*` | 13 |
-| 36 | HTTPS hoạt động thật | Token và dữ liệu không đi dạng plaintext | ⚠️ Có nginx TLS nhưng không khởi động được | 39 |
-| 37 | Không dùng thư viện có lỗ hổng đã công bố | Sản phẩm bảo mật không được tự mang lỗ hổng | ⚠️ 2 lỗ hổng, 3 thư viện ngừng bảo trì | 55 |
-
-## C6. Vận hành
-
-| # | Chức năng bắt buộc | Vì sao bắt buộc | Hiện trạng | Mục |
-|---|---|---|---|---|
-| 38 | Triển khai 1 lệnh chạy được trên máy sạch | Người khác (và hội đồng) phải chạy được | ❌ | 39 |
-| 39 | Migration tự chạy khi khởi động | Nâng cấp không phải xoá dữ liệu | ❌ | 42 |
-| 40 | Theo dõi sức khoẻ sensor (heartbeat, cảnh báo khi sensor ngừng) | IDS chết âm thầm còn nguy hiểm hơn không có IDS | ❌ | 35 |
-| 41 | Metrics nội bộ: packets/s, rớt gói, độ sâu hàng đợi, độ trễ rule | Biết hệ thống có theo kịp traffic không | ⚠️ Có `/metrics` nhưng chỉ đếm số bản ghi DB | — |
-| 42 | Retention + compression dữ liệu | Không đầy ổ cứng | ✅ (chưa áp được vào DB cũ) | 42 |
-| 43 | Sao lưu DB | Mất DB = mất toàn bộ bằng chứng | ❌ | B9 |
-| 44 | Tắt an toàn (bắt SIGTERM) + ghi state atomic | Không mất/hỏng trạng thái khi `docker stop` | ⚠️ | 35 |
-| 45 | Log có cấu trúc (JSON) | Tìm kiếm, đẩy về hệ thống log tập trung | ⚠️ Có `tracing` nhưng log dạng text | — |
-
-## C7. Chất lượng & tài liệu
-
-| # | Chức năng bắt buộc | Vì sao bắt buộc | Hiện trạng | Mục |
-|---|---|---|---|---|
-| 46 | CI xanh: test, fmt, clippy, audit | Mọi thay đổi được kiểm tra tự động | ⚠️ Test pass; lint và audit fail | 8, 55 |
-| 47 | Test end-to-end: tấn công giả lập → alert xuất hiện trên WebSocket và kênh thông báo | Kiểm chứng đúng luồng chính — chính là luồng đang bị đứt | ❌ | 1 |
-| 48 | Test không phụ thuộc Internet, kiểm tra đúng hành vi (dùng mock) | Test phải ổn định và bắt được lỗi thật | ⚠️ Có test nhưng gọi mạng thật và assert sai | 56 |
-| 49 | Benchmark throughput (packets/s tối đa trước khi rớt gói) | Biết giới hạn thật của hệ thống | ❌ | 32 |
-| 50 | Build không phụ thuộc mạng | Build lại được trong CI/Docker bất kỳ lúc nào | ⚠️ | 43 |
-| 51 | README/tài liệu khớp với code | Người dùng, hội đồng đọc README để đánh giá | ⚠️ Nhiều chỗ sai | 45 |
-
-## C8. Bắt buộc riêng cho demo / bảo vệ đồ án
-
-| # | Chức năng bắt buộc | Vì sao bắt buộc | Hiện trạng | Mục |
-|---|---|---|---|---|
-| 52 | Chọn được từng kịch bản tấn công để demo (biến môi trường hoặc nút trên UI) | README hướng dẫn `DEMO_SCENARIO=port_scan` nhưng code bỏ qua | ⚠️ | 44 |
-| 53 | Luồng demo hoàn chỉnh: tấn công → alert trên UI → chuông → Telegram/Email | Đây là thứ hội đồng sẽ xem | ❌ | 1, 7 |
-| 54 | Dashboard chỉ hiển thị số liệu thật | Số liệu bịa trên màn hình demo làm mất uy tín toàn bộ đồ án | ❌ Biểu đồ throughput là số giả | 47 |
-| 55 | Số liệu đánh giá: precision/recall, tỉ lệ báo nhầm, throughput | Phần "Đánh giá kết quả" của báo cáo đồ án | ❌ | 13, 44 |
-
-## Tổng kết Phần C
-
-| Hiện trạng | Số chức năng |
-|---|---|
-| ✅ Đã có và chạy đúng | 5 / 55 |
-| ⚠️ Có nhưng lỗi hoặc thiếu một phần | 22 / 55 |
-| ❌ Chưa có | 28 / 55 |
+### 18. Các điểm yếu bảo mật khác
+- `/metrics` và `/swagger-ui` công khai, không cần đăng nhập. `/metrics` chạy 4 truy vấn `count(*)` mỗi lần gọi (dễ bị lạm dụng).
+- Email gửi bằng `builder_dangerous` (`email.rs:78`), **không TLS/STARTTLS**, nên mật khẩu SMTP đi dạng rõ. Server yêu cầu TLS sẽ từ chối.
+- SSRF webhook vẫn dính **DNS rebinding** (kiểm tra DNS xong, `reqwest` lại tự resolve lần nữa).
+- Port `3000` của frontend bind `0.0.0.0` (`docker-compose.yml:78`), nên truy cập được qua HTTP thuần từ LAN, **bỏ qua TLS** của nginx.
+- Tài khoản seed có mật khẩu công khai trong `WINDOWS_DOCKER_GUIDE.md`, và không có cơ chế buộc đổi mật khẩu.
+- Postgres và Redis dùng mật khẩu mặc định / không mật khẩu (chỉ bind `127.0.0.1`).
+- Đổi role của user không có hiệu lực tới khi access token hết hạn (24 giờ).
+- `refresh_token` có race TOCTOU: hai request đồng thời cùng dùng một refresh token đều qua được.
+- Logout thu hồi được refresh token của **người khác** nếu biết chuỗi token (không kiểm tra `sub`).
 
 ---
 
-# Đề xuất thứ tự làm
+# PHẦN C — ĐỘ CHÍNH XÁC PHÁT HIỆN (🟠)
 
-| Giai đoạn | Việc | Mục |
+### 19. DNS Tunneling tạo "bão" alert — [Đã chạy thử]
+- Chống lặp theo **tên miền đầy đủ** (`dns_tunneling.rs:103`), mà mỗi truy vấn tunneling có subdomain ngẫu nhiên, nên gần như không có chống lặp.
+- Thực tế: **14 alert trong khoảng 1 phút** cho một phiên exfil (nhiều nhất trong mọi loại).
+- Chỉ xét nhãn đầu tiên, `min_length` cố định 30. Tunneling dùng nhãn ngắn hoặc nhiều nhãn sẽ lọt.
+
+### 20. Z-Score báo nhầm — [Đã chạy thử]
+- Đo **kích thước từng gói** (`zscore_anomaly.rs:116`), không đo lưu lượng theo khoảng thời gian như tên gọi "Traffic Volume". Gói 1.500 byte giữa nhiều gói ACK nhỏ là đủ báo động.
+- Thực tế đã sinh alert *"Abnormal traffic spike of **128 bytes**"* ngay trong kịch bản Brute Force.
+- EWMA được cập nhật bằng chính giá trị đang xét **trước khi** tính z, nên spike tự làm loãng baseline.
+
+### 21. Port Scan sinh thêm alert Brute-Force
+- Quét cổng 20→49 chạm cổng 21, 22, 23, nên mỗi vòng quét sinh thêm 3 alert Brute-Force (đã thấy khi chạy).
+- UDP: gói trả lời từ DNS server tới nhiều cổng tạm của client bị đếm như quét cổng.
+
+### 22. Brute-force trên PostgreSQL không bao giờ phát hiện được
+- `live.rs:212` bỏ **mọi** gói cổng 5432/6379 (để tránh vòng lặp nội bộ), nhưng cổng 5432 lại nằm trong danh sách `sensitive_ports` của Brute-Force. Tấn công vào Postgres thật trong mạng sẽ không bị phát hiện.
+
+### 23. Cấu hình rule từ DB chỉ áp dụng một phần
+- `severity`, `condition_json`, `mitre_*` trong DB **bị bỏ qua**: severity và MITRE hard-code trong từng detector.
+- ARP và Beaconing bỏ qua cả `threshold_value` và `time_window_seconds`. DNS bỏ qua `time_window_seconds`. Z-Score bỏ qua `time_window_seconds`.
+- Rule tạo mới từ UI **không làm gì cả**, vì engine chỉ có 8 detector cố định.
+- Cooldown 30s/60s hard-code. `threshold_value = 0` thì mọi gói đều kích hoạt.
+- ICMP dùng `time_window_seconds` không kẹp `max(1)` (khác các detector khác).
+
+### 24. Simulator không demo được đủ 8 rule — [Đã chạy thử]
+- Không có kịch bản **ICMP Flood** và **C2 Beaconing**: chạy 2 phút được 0 alert cho 2 rule này.
+- Chế độ `all` đổi kịch bản mỗi **60 gói** (`main.rs:283`), nên SYN Flood (250 gói), Port Scan và ARP bị cắt giữa chừng. Với mặc định 20 pkt/s khi chạy ngoài Docker, SYN Flood không bao giờ đạt ngưỡng 200 gói/5 giây.
+- Kịch bản Port Scan và ARP không có điểm kết thúc. Kịch bản Volume Spike tạo gói tới 15.000 byte (lớn hơn MTU, không thực tế).
+
+---
+
+# PHẦN D — ỔN ĐỊNH & VẬN HÀNH (🟠/🟡)
+
+### 25. Các cầu nối real-time chết vĩnh viễn khi mất kết nối DB
+- Backend: `while let Ok(notification) = listener.recv()` (`main.rs:83`, `main.rs:123`) **thoát vòng lặp ở lỗi đầu tiên**. Postgres restart là WS và thông báo ngừng hẳn cho tới khi restart backend.
+- Capture engine: listener `rules_changed` (`main.rs:152`) cũng vậy. Nếu lúc khởi động không kết nối được DB, engine chạy "memory mode" **vĩnh viễn** và mọi alert bị bỏ.
+- WS handler: `while let Ok(..) = rx.recv()` thoát khi client chậm bị `Lagged`, nên client bị ngắt. Handler không đọc socket nên không phát hiện client đã đóng cho tới lần gửi kế tiếp.
+
+### 26. Live capture lỗi nhưng báo "healthy"
+- Không mở được interface thì log *"Switching to simulation"* (`main.rs:394`) nhưng **không chuyển gì cả**: tiến trình chạy không, heartbeat vẫn báo `healthy`.
+- Heartbeat luôn gửi `packets_captured = 0`, `packets_dropped = 0` (đã thấy `packets_captured: 0` sau 45.000 gói), nên trạng thái `degraded` không bao giờ xuất hiện.
+- Kênh traffic dùng `try_send` và bỏ gói âm thầm khi đầy. Live capture không xử lý VLAN 802.1Q, IPv6 extension header, fragment. Lỗi đọc gói liên tục gây vòng lặp spam log.
+- Trong Docker, capture-engine dùng mạng bridge, nên chế độ live chỉ thấy traffic của chính container (cần `network_mode: host`).
+
+### 27. `/ws/traffic` không phải luồng live thật
+- Mỗi batch (tối đa 100 event hoặc 500 ms) chỉ `pg_notify` **1 event mẫu** (`capture-engine/src/main.rs:20`), nên WS chỉ nhận khoảng 2 event/giây dù tải 200–10.000 pkt/s.
+
+### 28. Redis client tự viết
+- Một kết nối TCP duy nhất sau `Mutex`, **không có timeout đọc**. Mọi request đều qua rate-limit Redis, nên Redis treo là **toàn bộ API treo**.
+- Phản hồi EOF bị hiểu thành `false` (ví dụ "token chưa bị thu hồi") mà không reset kết nối.
+
+### 29. Throttler thông báo gộp nhầm
+- Khoá `(rule_id, src_ip)`. Alert có `rule_id = NULL` (rule bị xoá hoặc không khớp) từ các detector khác nhau cùng một IP bị coi là trùng, nên cảnh báo thứ hai không được gửi.
+
+### 30. Kênh thông báo seed hỏng làm rác audit log — [Đã chạy thử]
+- 3 kênh seed đều bật nhưng cấu hình không hợp lệ: webhook `http://localhost` bị chặn SSRF, Telegram thiếu `bot_token`, SMTP thiếu tài khoản. Mỗi alert High trở lên sinh 3 dòng `ALERT_NOTIFICATION_*:FAILED` (17 dòng sau 2 phút).
+- Nút "Test" kênh trả lỗi chung chung *"An internal server error occurred…"* (`AppError::Internal` bị che), nên người dùng không biết sai ở đâu.
+- Email: nhập username rỗng thì vẫn gửi `Credentials("", "")`. Không cấu hình được `from_email` từ UI.
+
+### 31. Migration chạy hai lần và dữ liệu seed bị nhân đôi — [Đã chạy thử]
+- Postgres chạy `migrations/*.sql` qua `docker-entrypoint-initdb.d`, sau đó backend chạy `sqlx migrate` lần nữa. Seed traffic không có `ON CONFLICT`, nên mỗi dòng seed xuất hiện 2 lần (dashboard hiển thị 54 gói thay vì 27).
+- Migration lỗi chỉ log `warn` rồi **vẫn khởi động** (`main.rs:39-43`).
+
+### 32. Số liệu & hiệu năng
+- `/metrics`: `secnet_http_requests_total` luôn bằng 0 (`increment_http_requests()` không được gọi). `uptime` tính từ lần scrape đầu tiên (`init_metrics()` không được gọi).
+- `/api/dashboard/summary` quét **toàn bộ** hypertable (SUM + 2 GROUP BY, không giới hạn thời gian) mỗi lần tải. Cột "pkt_count" của top talkers thực ra là **số dòng**, không phải số gói.
+- Lọc `src_ip`/`dst_ip` sai định dạng bị bỏ qua âm thầm và trả **toàn bộ** dữ liệu (đã thử `?src_ip=notanip`). `ILIKE` không escape `%`/`_`.
+- `PATCH /api/alerts/:id` với `status: "open"` vẫn gán `acknowledged_by` (đã thử), nên alert "mở lại" bị khoá cho analyst đó. Không kiểm tra chuyển trạng thái hợp lệ (ví dụ `resolved` → `open`).
+- Export CSV: tham số `format` bị bỏ qua, cắt cứng 1.000 dòng không báo, không có trong OpenAPI. Viewer vẫn export được.
+- Audit log: cột `ip_address` luôn `NULL` với login/logout. `UNBLOCK_IP` ghi UUID thay vì IP. `BLOCK_IP` ghi lý do vào cột `target`.
+
+---
+
+# PHẦN E — FRONTEND (🟡)
+
+### 33. Dashboard hiển thị số liệu sai
+- "Current throughput" in **tổng byte cộng dồn** với đơn vị "B/s" (`dashboard.rs:93`), nên con số tăng mãi. Nguồn dữ liệu lại chỉ là event mẫu (mục 27).
+- "Total detected alerts" là độ dài danh sách đã tải về (tối đa 50–100), không phải tổng thật. `summary.total_alerts` từ API bị bỏ qua.
+- "Critical incidents" cũng chỉ đếm trên danh sách cục bộ. Summary chỉ tải một lần, không tự làm mới.
+
+### 34. Rò rỉ tác vụ và bộ nhớ
+- `TrafficChart` (`traffic_chart.rs:14`) mỗi lần mount lại `spawn_local` **một vòng lặp vô hạn mới** và không huỷ. Chuyển tab qua lại nhiều lần là có nhiều vòng lặp chạy song song.
+- Mỗi lần reconnect WS gọi `forget()` 4 closure. Mỗi alert Critical tạo `AudioContext` mới mà không đóng. Blob URL của CSV không bị `revoke`.
+
+### 35. WebSocket reconnect chậm
+- WS khởi động ngay khi mở app, kể cả chưa login. Chưa có token nên bị 401, backoff tăng lên 30 giây. Sau khi login phải **chờ tới 30 giây** mới nhận được alert real-time.
+- `backoff_ms` **không bao giờ reset** sau khi kết nối thành công (`ws/client.rs:90`).
+
+### 36. Phân quyền & xử lý lỗi trên UI
+- Trang Rules, Blocklist, Settings không ẩn nút theo vai trò. Viewer/Analyst bấm thì nhận 403 **im lặng**, vì hầu hết lời gọi API dùng `if let Ok(..)` và bỏ lỗi.
+- Có thể vào thẳng `#settings`, `#audit_logs` bằng hash URL dù không đủ quyền (không có route guard).
+- Không có trang **quản lý người dùng** (README có nhắc). API `update_notification_channel` và `get_sensor_status` có sẵn nhưng **UI không dùng**, nên không sửa được kênh và không xem được trạng thái sensor.
+- Blocklist trên UI luôn chặn 24 giờ cố định và không hiển thị thời điểm hết hạn.
+- Lọc và tìm kiếm alert chỉ chạy trên dữ liệu đã tải về, không có phân trang, không dùng tham số `search` của server.
+
+---
+
+# PHẦN F — CI, PHỤ THUỘC, TÀI LIỆU (🟡)
+
+### 37. `cargo audit` fail
+- `idna 0.5.0` (RUSTSEC-2024-0421), kéo vào qua `validator 0.18`. Cần nâng `validator` lên bản dùng `idna >= 1.0`.
+- Cảnh báo unmaintained: `paste`, `proc-macro-error`, `proc-macro-error2` (crate cuối còn báo *future-incompat* khi build).
+
+### 38. Kiểm thử thiếu
+- 30 test chỉ kiểm tra hàm thuần (hash, JWT, SSRF, throttler, detector). **Không có test handler với DB** (ví dụ `sqlx::test`), nên lỗi 500 của Rules, lỗi `VARCHAR(20)` và lỗi khoá ngoại khi xoá rule đều lọt qua CI.
+
+### 39. Tài liệu lệch với code
+- README ghi Admin "quản lý người dùng": không có API hay UI cho việc này.
+- `WINDOWS_DOCKER_GUIDE.md` ghi Analyst "quản lý IP blocklist": code chỉ cho Admin.
+- `WINDOWS_DOCKER_GUIDE.md` nói demo làm "chuông báo động lập tức kích hoạt": thực tế ARP không bao giờ kích hoạt (mục 6), và ICMP/Beaconing không có kịch bản (mục 24).
+- `pipeline.rs` (`RedisStreamBrokerSink`, `LocalChannelSink`) và `process_batch` là code chết.
+
+---
+
+# PHẦN G — TRẠNG THÁI CÁC LỖI TỪ BẢN RÀ TRƯỚC (56 mục)
+
+| # | Nội dung (bản trước) | Trạng thái hiện tại |
 |---|---|---|
-| **1. Cho hệ thống chạy được** | Sửa healthcheck + cert nginx, nối pipeline alert/traffic (LISTEN/NOTIFY), sửa WS client reconnect, khớp tên rule, sửa ngưỡng DNS, biểu đồ dùng số liệu thật, sửa form cấu hình kênh, `cargo fmt` + `clippy` | 1–8, 39, 42, 47, 48 |
-| **2. Vá bảo mật Critical/High** | Chặn tự đăng ký Admin, xác thực WebSocket, ẩn secret kênh thông báo, sửa XFF, CORS, JWT secret, Redis/Postgres không expose, logout thu hồi refresh token, frontend dùng refresh token, nâng `validator` | 9–17, 46, 55 |
-| **3. Giảm false positive** | Viết lại brute-force, port scan, z-score, beaconing, ARP; allowlist trước khi bật auto-block | 17, 24–29 |
-| **4. Ổn định & hiệu năng** | TTL cache, bucket counter, crate Redis chuẩn + pool, dùng rollup cho dashboard, retry kênh thông báo, sửa Email/Slack, viết lại test bằng mock | 30–38, 56 |
-| **4b. Hoàn thiện giao diện** | Ẩn nút theo quyền + báo lỗi, tự làm mới dữ liệu, lọc phía server, routing theo URL, bỏ `eval` | 49–54 |
-| **5. Hoàn tất chức năng bắt buộc còn thiếu** | Allowlist, parse ARP/DNS, trang chi tiết alert + audit log, heartbeat sensor, 2FA Admin, backup, test end-to-end, đo precision/recall | Phần C (các mục ❌) |
-| **6. Tính năng mở rộng** | Chọn từ Phần B; ưu tiên cho đồ án: MITRE ATT&CK + threat intel (B3), incident/case (B4), honeypot và LLM tóm tắt sự cố (B12) | B1–B12 |
+| 1 | Alert không tới WS/Email/Telegram/Webhook | ✅ Đã nối (PgListener), nhưng ❌ bị đẩy 2 lần (mục 4) |
+| 2 | Không ghi `traffic_events` | ⚠️ Đã ghi, nhưng mất ~42% (mục 3) |
+| 3 | ARP/DNS chỉ chạy với simulator | ⚠️ Đã parse ARP/DNS ở live, nhưng logic ARP sai (mục 6) |
+| 4 | DNS threshold 50 vô hiệu hoá rule | ✅ Đã sửa |
+| 5 | Tên rule DB ≠ code | ✅ Đã sửa (seed đổi tên + bảng ánh xạ) |
+| 6 | Sửa rule không áp dụng real-time | ⚠️ Đã có `LISTEN rules_changed`, nhưng API sửa rule đang 500 (mục 1), bỏ qua severity (mục 23), rule bị xoá vẫn chạy (mục 5) |
+| 7 | WS mở kết nối mới mỗi 5 giây | ✅ Đã sửa. Còn lỗi backoff (mục 35) |
+| 8 | CI fail 2/3 job | ⚠️ `lint` đã qua, `security-audit` vẫn fail (mục 37) |
+| 9 | Tự đăng ký được Admin | ✅ Đã sửa (đã thử) |
+| 10 | WS không xác thực | ✅ Đã sửa (401 khi không có token). Còn mục 16 |
+| 11 | Lộ secret kênh | ⚠️ Che một phần. Slack URL và object lồng nhau vẫn lộ (mục 12) |
+| 12 | Bypass rate-limit bằng header | ❌ Vẫn còn (mục 14) |
+| 13 | CORS wildcard | ⚠️ Có whitelist qua env, nhưng không cấu hình thì vẫn `Any` |
+| 14 | JWT secret mẫu qua được kiểm tra production | ✅ Đã sửa |
+| 15 | Redis/Postgres expose | ⚠️ Chỉ bind 127.0.0.1, mật khẩu vẫn mặc định |
+| 16 | Logout không thu hồi refresh token | ⚠️ Server đã thu hồi, nhưng **frontend không gửi request** (mục 8) |
+| 17 | Auto-block tự chặn hạ tầng | ⚠️ Có allowlist, nhưng chặn sai IP (mục 7) và không hiệu lực (mục 17) |
+| 18 | Timing attack dò username | ✅ Có dummy hash |
+| 19 | Khoá tài khoản bị DoS | ❌ Vẫn còn, thêm lỗi bypass qua email (mục 13) |
+| 20 | CSV injection | ✅ Đã sửa |
+| 21 | SSRF DNS rebinding | ❌ Vẫn còn (mục 18) |
+| 22 | Telegram Markdown không escape | ✅ Đã chuyển sang HTML + escape |
+| 24–29 | False positive các detector | ⚠️ Một phần đã sửa (VecDeque, lọc SYN/ACK). Còn mục 6, 19–22 |
+| 30 | Map không dọn | ⚠️ Detector đã dọn. Map trong backend chưa (mục 14) |
+| 33 | Redis client tự viết | ❌ Vẫn còn (mục 28) |
+| 35 | Live capture lỗi âm thầm | ❌ Vẫn còn (mục 26) |
+| 36 | Kênh thông báo luôn báo thành công | ✅ Đã trả lỗi, nhưng thông điệp bị che (mục 30) |
+| 37 | Email không dùng được với SMTP thật | ❌ Vẫn không có TLS (mục 18) |
+| 38 | Slack không hoạt động | ✅ Đã có kênh Slack |
+| 39 | `docker compose up` không chạy trên máy sạch | ⚠️ Cert/healthcheck đã sửa, nhưng **build backend fail** (mục 2) |
+| 40–41 | Capture trong Docker / blocklist không nhất quán | ❌ Vẫn còn (mục 17, 26) |
+| 42 | Migration không áp dụng DB đang chạy | ✅ Đã chạy tự động lúc khởi động. Còn lỗi seed trùng (mục 31) |
+| 46 | Frontend không dùng refresh token | ❌ Vẫn còn (mục 9) |
+| 47 | Biểu đồ throughput giả | ⚠️ Không còn số ngẫu nhiên, nhưng số liệu sai (mục 33) |
+| 48 | Settings lưu sai key kênh | ✅ Đã sửa |
+| 49 | Nút sai quyền, lỗi bị nuốt | ❌ Vẫn còn (mục 36) |
+| 50–51 | Không tự làm mới, lọc chỉ phía client | ❌ Vẫn còn |
+| 52 | Không có routing URL | ✅ Có hash routing (chưa có route guard) |
+| 53 | Dùng `js_sys::eval` | ✅ Đã bỏ |
+| 54 | Thiếu thao tác quản trị | ❌ Vẫn thiếu quản lý user, sửa kênh, xem sensor |
+| 55 | `cargo audit` 2 lỗ hổng | ⚠️ Còn 1 (`idna`) |
+
+---
+
+# Đề xuất thứ tự sửa
+
+1. **Mục 1, 2, 3:** thêm `mitre_*` vào các query của rules, `COPY migrations` trong Dockerfile, nới `flags` lên `TEXT`. Ba sửa nhỏ này mở khoá trang Rules, Docker và dữ liệu traffic.
+2. **Mục 4, 5, 8:** bỏ `pg_notify` thừa, tắt detector khi rule bị xoá (hoặc đặt `rule_id = None`), `.await` request logout.
+3. **Mục 11–14:** xác thực heartbeat, che secret đệ quy, khoá tài khoản theo user id, chỉ tin header IP từ proxy tin cậy.
+4. **Mục 6, 7, 19, 20:** sửa logic ARP, lấy attacker IP đúng cho SYN Flood, chống lặp DNS theo `(src, domain gốc)`, Z-Score theo cửa sổ thời gian.
+5. **Mục 25, 26, 9, 10:** tự kết nối lại listener, trạng thái sensor thật, dùng refresh token, sửa `<For>` để UI cập nhật.
+6. Thêm test tích hợp dùng DB thật (`sqlx::test`) cho các handler, và nâng `validator` để CI qua `cargo audit`.

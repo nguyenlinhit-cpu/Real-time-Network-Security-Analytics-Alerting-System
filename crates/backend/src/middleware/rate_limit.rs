@@ -5,7 +5,9 @@ use axum::{
 };
 use std::time::{Duration, Instant};
 
-use crate::{error::AppError, state::AppState};
+use crate::{error::AppError, middleware::client_ip::ClientIp, state::AppState};
+
+pub const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
 
 pub async fn rate_limit_middleware(
     State(state): State<AppState>,
@@ -13,25 +15,16 @@ pub async fn rate_limit_middleware(
     next: Next,
 ) -> Result<Response, AppError> {
     let client_ip = request
-        .headers()
-        .get("x-real-ip")
-        .and_then(|v| v.to_str().ok())
-        .or_else(|| {
-            request
-                .headers()
-                .get("x-forwarded-for")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.rsplit(',').next()) // right-most hop before proxy
-        })
-        .map(|s| s.trim())
-        .unwrap_or("127.0.0.1")
-        .to_string();
+        .extensions()
+        .get::<ClientIp>()
+        .map(|c| c.0.to_string())
+        .unwrap_or_else(|| "127.0.0.1".to_string());
 
     let path = request.uri().path().to_string();
     let is_auth_sensitive = path.contains("/api/auth/login") || path.contains("/api/auth/register");
 
     let max_requests = if is_auth_sensitive { 10 } else { 200 };
-    let window = Duration::from_secs(60);
+    let window = RATE_LIMIT_WINDOW;
 
     let key = format!(
         "ratelimit:{}:{}",

@@ -22,5 +22,6 @@ pub struct CreateBlockedIpDto {
     pub ip_address: String,
     #[validate(length(min = 3, max = 500))]
     pub reason: String,
+    #[validate(range(min = 60, max = 31_536_000, message = "Duration must be between 60 seconds and 365 days"))]
     pub duration_seconds: Option<i64>,
 }

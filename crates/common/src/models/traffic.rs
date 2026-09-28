@@ -28,6 +28,8 @@ pub struct TrafficSummaryDto {
     pub total_packets: i64,
     pub total_bytes: i64,
     pub total_alerts: i64,
+    #[serde(default)]
+    pub critical_alerts: i64,
     pub top_src_ips: Vec<TopEntityDto>,
     pub top_dst_ports: Vec<TopEntityDto>,
 }
@@ -50,4 +52,14 @@ pub struct TrafficQueryFilter {
     pub protocol: Option<String>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
+}
+
+/// Batched live-traffic update pushed over `/ws/traffic`.
+/// `events` holds only a small sample; the totals cover every event in the batch.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub struct TrafficBatchDto {
+    pub events: Vec<TrafficEvent>,
+    pub total_bytes: i64,
+    pub total_packets: i64,
 }

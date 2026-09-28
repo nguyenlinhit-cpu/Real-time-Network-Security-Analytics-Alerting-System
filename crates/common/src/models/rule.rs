@@ -48,22 +48,31 @@ pub struct CreateRuleDto {
     pub condition_json: serde_json::Value,
     pub severity: AlertSeverity,
     pub is_enabled: Option<bool>,
+    #[validate(range(min = 0.0, message = "Threshold must be non-negative"))]
     pub threshold_value: f64,
+    #[validate(range(min = 1, max = 86_400, message = "Time window must be between 1 and 86400 seconds"))]
     pub time_window_seconds: i32,
+    #[validate(length(max = 50))]
     pub mitre_tactic: Option<String>,
+    #[validate(length(max = 50))]
     pub mitre_technique: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct UpdateRuleDto {
+    #[validate(length(min = 3, max = 100))]
     pub name: Option<String>,
     pub rule_type: Option<RuleType>,
     pub condition_json: Option<serde_json::Value>,
     pub severity: Option<AlertSeverity>,
     pub is_enabled: Option<bool>,
+    #[validate(range(min = 0.0, message = "Threshold must be non-negative"))]
     pub threshold_value: Option<f64>,
+    #[validate(range(min = 1, max = 86_400, message = "Time window must be between 1 and 86400 seconds"))]
     pub time_window_seconds: Option<i32>,
+    #[validate(length(max = 50))]
     pub mitre_tactic: Option<String>,
+    #[validate(length(max = 50))]
     pub mitre_technique: Option<String>,
 }
