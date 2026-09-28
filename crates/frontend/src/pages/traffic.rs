@@ -27,19 +27,14 @@ pub fn TrafficPage(
         source
             .into_iter()
             .filter(|t| {
-                match proto.as_deref() {
+                let proto_matches = match proto.as_deref() {
                     // DNS runs over UDP/TCP 53; the capture engine tags queries with "DNS:<name>".
-                    Some("dns") => {
-                        if !t.flags.starts_with("DNS:") {
-                            return false;
-                        }
-                    }
-                    Some(p) => {
-                        if !t.protocol.eq_ignore_ascii_case(p) {
-                            return false;
-                        }
-                    }
-                    None => {}
+                    Some("dns") => t.flags.starts_with("DNS:"),
+                    Some(p) => t.protocol.eq_ignore_ascii_case(p),
+                    None => true,
+                };
+                if !proto_matches {
+                    return false;
                 }
                 if !query.is_empty() {
                     let s_ip = t.src_ip.ip().to_string();

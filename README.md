@@ -142,11 +142,11 @@ flowchart TD
 | # | Tên Quy tắc | Kỹ thuật MITRE | Độ nghiêm trọng | Thuật toán & Cơ chế phát hiện |
 |---|---|---|---|---|
 | **1** | **Port Scan Detection** | Discovery (`T1046`) | High | Theo dõi số lượng cổng đích phân biệt trên 1 cặp IP trong cửa sổ trượt $O(1)$. Chỉ tính gói TCP SYN (loại trừ phản hồi server trên cổng tạm thời). Ngưỡng mặc định: > 15 cổng / 10s. |
-| **2** | **SYN Flood / DDoS** | Impact (`T1498`) | Critical | Đếm số lượng gói tin mang cờ `SYN` (không kèm `ACK`) nhắm vào mục tiêu trong 5 giây. Ngưỡng mặc định: > 200 pkts / 5s. Tự động kích hoạt IPS block IP nguồn 2 giờ. |
+| **2** | **SYN Flood / DDoS** | Impact (`T1498`) | Critical | Đếm số lượng gói tin mang cờ `SYN` (không kèm `ACK`) nhắm vào mục tiêu trong 5 giây. Ngưỡng mặc định: > 200 pkts / 5s. Xác định nguồn chiếm ưu thế (≥ 50% số SYN); chỉ khi đó mới tự động đưa IP nguồn vào blocklist 2 giờ — flood phân tán/giả mạo nguồn không bị auto-block. |
 | **3** | **SSH/RDP Brute-Force** | Credential Access (`T1110`) | High | Giám sát kết nối dồn dập vào cổng xác thực nhạy cảm (21, 22, 23, 3389, 5432, 3306). Chỉ đếm gói SYN khởi tạo hoặc RST (kết nối thất bại), triệt tiêu báo nhầm từ việc gõ phím SSH thông thường. |
-| **4** | **ARP Spoofing / Poisoning** | Credential Access (`T1557`) | Critical | Duy trì bảng ánh xạ `IP -> MAC` trong bộ nhớ. Phát hiện khi IP đổi địa chỉ MAC đột ngột. Giữ lại MAC tin cậy ban đầu để tránh hiện tượng flapping khi host thật phản hồi. |
-| **5** | **DNS Tunneling Detection** | Exfiltration (`T1071.004`) | Medium / High | Phân tích QNAME từ gói tin DNS UDP/53. Tính toán Shannon Entropy $H(X) = -\sum P(x)\log_2 P(x)$ trên subdomain. Ngưỡng entropy > 3.8 với nhãn > 30 ký tự. |
-| **6** | **Traffic Volume Anomaly** | Exfiltration (`T1020`) | Medium | Áp dụng đường cơ sở thích ứng EWMA và Z-Score: $Z = \frac{x - \mu}{\sigma} > 3.0$ trên cửa sổ kích thước động, nhận diện các đợt rò rỉ dữ liệu đột biến. |
+| **4** | **ARP Spoofing / Poisoning** | Credential Access (`T1557`) | Critical | Duy trì bảng ánh xạ *IP người gửi → MAC người gửi* từ gói ARP. Cảnh báo khi một gói ARP khẳng định IP đã biết nằm ở MAC khác. Giữ MAC tin cậy (không flapping); chấp nhận MAC mới nếu MAC cũ im lặng > 1 giờ. IP trong cảnh báo là nạn nhân nên không bao giờ bị auto-block. |
+| **5** | **DNS Tunneling Detection** | Exfiltration (`T1071.004`) | Medium / High | Phân tích QNAME từ gói tin DNS UDP/53. Tính Shannon Entropy $H(X) = -\sum P(x)\log_2 P(x)$ trên nhãn dài nhất bên trái domain gốc. Ngưỡng entropy ≥ 3.8 với nhãn ≥ 30 ký tự; chống lặp theo (IP nguồn, domain gốc) trong 60 giây. |
+| **6** | **Traffic Volume Anomaly** | Exfiltration (`T1020`) | Medium | Gom tổng byte theo từng giây; so sánh giây vừa kết thúc với baseline cửa sổ trượt *và* EWMA (chỉ từ các giây trước): $Z = \frac{x - \mu}{\sigma} \ge 3.0$. Một gói lớn đơn lẻ không còn gây báo động. |
 | **7** | **ICMP Flood / Smurf** | Impact (`T1498.001`) | High | Đếm lưu lượng ICMP/ICMPv6 dồn dập vượt ngưỡng (mặc định > 50 pkts / 5s) nhắm tới một địa chỉ đích, phát hiện sớm các đợt Ping Flood hoặc Smurf DDoS. |
 | **8** | **C2 Beaconing Callback** | Command & Control (`T1071`) | High | Phân tích chuỗi khoảng thời gian $(\Delta t)$ giữa các kết nối ra ngoài liên tiếp. Tính hệ số biến thiên $CV = \frac{\sigma}{\mu}$. Cảnh báo khi $CV \le 0.15$ (chu kỳ rất đều, jitter cực thấp đặc trưng của mã độc C2). |
 
@@ -154,11 +154,12 @@ flowchart TD
 
 ## 🔔 4. Hệ thống Cảnh báo Đa kênh (Multi-Channel Alerting)
 
-1. **Email Sink (`lettre`):** Hỗ trợ STARTTLS và SMTP xác thực an toàn, gửi báo cáo bảo mật HTML đẹp mắt.
+1. **Email Sink (`lettre`):** STARTTLS (mặc định, cổng 587/2525), TLS (465) hoặc không mã hoá cho relay nội bộ (`smtp_security`); không bao giờ gửi mật khẩu qua kết nối không mã hoá. Nội dung dạng văn bản thuần.
 2. **Telegram Bot Sink (`reqwest`):** Sử dụng định dạng `HTML` an toàn (tránh lỗi cú pháp markdown khi gặp ký tự lạ), kèm icon mức độ nghiêm trọng và nút bấm trực tiếp.
 3. **Slack Incoming Webhook:** Định dạng JSON Block Kit chuẩn (`text` và `blocks`), tương thích hoàn toàn với Slack Apps và Incoming Webhooks.
-4. **Custom SIEM Webhook:** Payload chuẩn JSON kèm HMAC signature xác thực nguồn gốc, chống SSRF vào mạng nội bộ.
-5. **Cơ chế Chống bão cảnh báo (Alert Throttling):** Áp dụng cửa sổ cooldown 60 giây theo khóa `(rule_id, src_ip)` để không làm nghẽn kênh liên lạc của SOC.
+4. **Custom SIEM Webhook:** Payload JSON của alert qua HTTPS; chống SSRF (chặn dải IP nội bộ, không theo redirect, ghim IP đã kiểm tra để chống DNS rebinding).
+5. **Cơ chế Chống bão cảnh báo (Alert Throttling):** Cooldown 60 giây (`ALERT_DEDUPLICATION_WINDOW_SECONDS`) theo khóa `(rule_id, src_ip)` (hoặc tiêu đề alert nếu không có rule), phân tán qua Redis khi có.
+6. **Kiểm tra kênh:** Nút "Send test alert" hiển thị lý do lỗi cụ thể (SMTP, HTTP status…). Kênh mẫu trong seed bị tắt sẵn cho tới khi admin cấu hình thật.
 
 ---
 
@@ -167,12 +168,12 @@ flowchart TD
 - **Live Throughput Chart:** Đo lường chính xác lượng byte/giây thực tế (delta throughput theo giây) nhận qua WebSocket, không dùng số liệu ngẫu nhiên.
 - **Threat Incidents & Inspect Modal:** Hiển thị thẻ MITRE ATT&CK cho từng cảnh báo; nút "Inspect" mở cửa sổ phân tích ngữ cảnh hiển thị 50 gói tin tương quan (±5 phút quanh thời điểm phát hiện).
 - **Phân quyền vai trò người dùng (RBAC):**
-  - `Admin`: Toàn quyền cấu hình rule, thêm kênh thông báo, xem audit log, chặn/bỏ chặn IP, quản lý người dùng.
-  - `Analyst`: Xem cảnh báo, xác nhận (Acknowledge) và đóng sự cố (Resolve), chặn IP độc hại.
+  - `Admin`: Toàn quyền cấu hình rule, kênh thông báo, xem audit log, chặn/bỏ chặn IP. (Chưa có giao diện quản lý người dùng; tài khoản tự đăng ký luôn là `Viewer`.)
+  - `Analyst`: Xem cảnh báo, xác nhận (Acknowledge), đóng (Resolve) và mở lại sự cố; xem blocklist (chỉ đọc).
   - `Viewer`: Chế độ chỉ đọc (Read-only); các nút thao tác bị ẩn/vô hiệu hóa an toàn.
 - **URL Hash Synchronization:** Hỗ trợ đồng bộ tab với URL (`#dashboard`, `#alerts`, `#traffic`, `#rules`, `#devices`, `#blocklist`, `#settings`, `#audit_logs`).
 - **Audit Logs View:** Trang quản trị nhật ký kiểm toán cho Admin, truy vết toàn bộ hành vi sửa luật, đổi cấu hình, xử lý sự cố.
-- **Sensor Health Indicator:** Đèn báo trạng thái kết nối của sensor (Healthy / Degraded / Offline) dựa trên heartbeat định kỳ 15 giây.
+- **Sensor Health Indicator:** Trạng thái sensor trên Dashboard (Healthy / Degraded / Failed / Offline) dựa trên heartbeat 15 giây với số gói bắt được/bị rơi thực tế.
 
 ---
 
@@ -200,9 +201,9 @@ docker compose up -d --build
 ```
 Hệ thống sẽ tự động:
 1. Khởi động TimescaleDB và Redis (ràng buộc an toàn vào `127.0.0.1`).
-2. Tự động áp dụng 15 bản migration CSDL khi backend khởi động (`sqlx::migrate!`).
+2. Tự động áp dụng các migration CSDL khi backend khởi động (`sqlx::migrate!`, nguồn duy nhất — backend dừng nếu migration lỗi).
 3. Khởi chạy Capture Engine ở chế độ simulator hoặc live capture.
-4. Mở cổng web qua Nginx Proxy tại `https://localhost` (hoặc `http://localhost:8080`).
+4. Mở web qua Nginx TLS tại `https://localhost` (chứng chỉ tự ký), hoặc `http://localhost:3000` chỉ từ chính máy chủ. API: `http://127.0.0.1:8080`.
 
 ### Cách 2: Chạy trực tiếp qua Nix Flake (Development)
 ```bash
@@ -218,13 +219,13 @@ cargo run -p backend
 # 4. Khởi chạy Capture Engine
 cargo run -p capture-engine
 
-# 5. Khởi chạy Frontend Web
-trunk serve crates/frontend/index.html
+# 5. Khởi chạy Frontend Web (proxy /api và /ws sang :8080, xem Trunk.toml)
+./run_frontend.sh
 ```
 
 ---
 
-## 🧪 8. Chạy Toàn bộ Bộ Kiểm thử (30 Tests - Passed 100%)
+## 🧪 8. Chạy Toàn bộ Bộ Kiểm thử (46 Tests)
 
 ```bash
 # Kiểm tra định dạng code chuẩn
@@ -233,19 +234,21 @@ nix develop --command cargo fmt --all -- --check
 # Kiểm tra cảnh báo linter
 nix develop --command cargo clippy --all-targets -- -D warnings
 
-# Chạy toàn bộ 30 bài kiểm thử
-nix develop --command cargo test --workspace
+# Chạy toàn bộ bài kiểm thử (đặt DATABASE_URL để chạy cả test tích hợp với TimescaleDB)
+docker compose up -d timescaledb
+DATABASE_URL=postgres://postgres:postgres@localhost:5432/network_security nix develop --command cargo test --workspace
 ```
 
-Danh mục 30 bài kiểm thử đã pass hoàn toàn:
-- `benchmark_evaluation_test`: Throughput benchmark + Precision/Recall evaluation (2 tests).
-- `detection_tests`: Kiểm thử 8 thuật toán phát hiện tấn công, snapshot & restore state, dynamic rule hot-reload (10 tests).
-- `alert_multichannel_simulation_test`: Mô phỏng Webhook, Telegram, Slack và cơ chế retry khi lỗi mạng (2 tests).
-- `alerting_tests`: Kiểm thử kênh thông báo và alert throttling deduplication (2 tests).
-- `api_integration_tests`: Kiểm thử phân quyền RBAC, xác thực JWT, băm mật khẩu Argon2id (4 tests).
-- `rate_limit_tests`: Kiểm thử sliding-window rate limiting bộ nhớ và Redis (1 test).
-- `webhook_ssrf_tests`: Kiểm thử ngăn chặn SSRF vào toàn bộ các dải IP riêng tư (4 tests).
-- `model_tests`: Kiểm thử tính hợp lệ của DTOs, Enums, IP network serialization (5 tests).
+Danh mục bài kiểm thử:
+- `api_db_tests`: Test tích hợp handler với DB thật — CRUD rule, vòng đời sự cố, blocklist, che secret, heartbeat, lockout, lưu DNS dài, dashboard (8 tests; bỏ qua nếu thiếu `DATABASE_URL`).
+- `detection_tests`: 8 thuật toán phát hiện, ARP theo IP người gửi, SYN flood phân tán, chống lặp DNS, rule xoá/tuỳ chỉnh, simulator phủ đủ 8 detector, snapshot & restore (16 tests).
+- `benchmark_evaluation_test`: Throughput benchmark + Precision/Recall (2 tests).
+- `alert_multichannel_simulation_test`: Email/Webhook/Telegram với mock server và xử lý lỗi (2 tests).
+- `alerting_tests`: Kênh thông báo và throttling (2 tests).
+- `api_integration_tests`: RBAC, JWT, Argon2id, tách access/refresh token (4 tests).
+- `rate_limit_tests`: Xác định IP client tin cậy, chống giả mạo `X-Real-IP` (3 tests).
+- `webhook_ssrf_tests`: Chặn SSRF vào dải IP riêng tư (4 tests).
+- `model_tests`: DTOs, Enums, IP network serialization (5 tests).
 
 ---
 

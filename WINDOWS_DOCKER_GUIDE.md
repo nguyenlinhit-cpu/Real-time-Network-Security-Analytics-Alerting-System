@@ -82,23 +82,24 @@ Mở bất kỳ trình duyệt nào trên Windows (Chrome, Edge, Firefox, Brave.
 
 | Thành phần | Đường dẫn (URL) | Ghi chú |
 |---|---|---|
-| **Web SOC Dashboard** | [http://localhost:3000](http://localhost:3000) | Giao diện điều khiển giám sát chính |
-| **Swagger UI (API Docs)**| [http://localhost:8080/swagger-ui](http://localhost:8080/swagger-ui) | Tài liệu kiểm thử REST API |
-| **Prometheus Metrics** | [http://localhost:8080/metrics](http://localhost:8080/metrics) | Chỉ số giám sát hiệu năng |
+| **Web SOC Dashboard** | [http://localhost:3000](http://localhost:3000) | Giao diện giám sát (HTTP, chỉ truy cập từ chính máy chạy Docker) |
+| **Web SOC Dashboard (TLS)** | [https://localhost](https://localhost) | Qua Nginx TLS, chứng chỉ tự ký — dùng khi truy cập từ máy khác |
+| **Swagger UI (API Docs)**| [http://localhost:8080/swagger-ui](http://localhost:8080/swagger-ui) | Tài liệu REST API (tắt khi `ENVIRONMENT=production`, trừ khi `ENABLE_SWAGGER=true`) |
+| **Prometheus Metrics** | [http://localhost:8080/metrics](http://localhost:8080/metrics) | Chỉ số giám sát (đặt `METRICS_TOKEN` để yêu cầu Bearer token) |
 
 ### 🔑 Tài khoản đăng nhập có sẵn:
 
 | Vai trò | Tên đăng nhập (Username) | Mật khẩu (Password) | Quyền hạn |
 |---|---|---|---|
 | **Admin** | `admin` | `Admin@SecNet2026!` | Toàn quyền cấu hình luật, phân quyền, blocklist, kênh cảnh báo |
-| **Analyst** | `analyst_linh` *(hoặc `analyst`)* | `Analyst@SecNet2026!` | Xử lý sự cố, xem và xác nhận cảnh báo, quản lý IP blocklist |
+| **Analyst** | `analyst_linh` *(hoặc `analyst`)* | `Analyst@SecNet2026!` | Xử lý sự cố, xác nhận / đóng / mở lại cảnh báo, xem blocklist (chỉ Admin được chặn/bỏ chặn IP) |
 | **Viewer** | `viewer_demo` *(hoặc `viewer`)* | `Viewer@SecNet2026!` | Xem báo cáo và biểu đồ giám sát (Read-only) |
 
 ---
 
 ## 🧪 5. Kiểm Thử Giả Lập Tấn Công (Demo Attack Scenarios)
 
-Hệ thống tích hợp sẵn engine giả lập 6 kịch bản tấn công an ninh mạng. Bạn có thể kích hoạt thử nghiệm bất kỳ kịch bản nào ngay từ Windows PowerShell bằng `docker exec`:
+Mặc định (`DEMO_SCENARIO=all`) capture-engine tự luân phiên đủ **8 kịch bản** tấn công, mỗi kịch bản cách nhau ~8 giây lưu lượng bình thường. Để chỉ chạy một kịch bản, đặt biến `DEMO_SCENARIO` rồi khởi động lại capture-engine:
 
 ```powershell
 # 1. Giả lập tấn công Port Scan (Quét cổng hàng loạt)
@@ -118,6 +119,15 @@ docker exec -it -e DEMO_SCENARIO=dns_tunneling secnet_capture_engine /app/captur
 
 # 6. Giả lập đột biến lưu lượng bất thường (Volume Anomaly Z-Score Spike)
 docker exec -it -e DEMO_SCENARIO=volume_spike secnet_capture_engine /app/capture-engine
+
+# 7. Giả lập ICMP Flood / Ping Flood
+docker exec -it -e DEMO_SCENARIO=icmp_flood secnet_capture_engine /app/capture-engine
+
+# 8. Giả lập C2 Beaconing (kết nối định kỳ ra máy chủ điều khiển)
+docker exec -it -e DEMO_SCENARIO=beaconing secnet_capture_engine /app/capture-engine
+
+# Cách gọn hơn: chạy lại container với một kịch bản cố định
+$env:DEMO_SCENARIO="syn_flood"; docker compose up -d capture-engine
 ```
 
 Quan sát trên Dashboard `http://localhost:3000`: Cảnh báo và chuông báo động sẽ lập tức kích hoạt, biểu đồ lưu lượng và bảng Incidents tự động cập nhật theo thời gian thực!
