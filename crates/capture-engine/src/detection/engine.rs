@@ -1,6 +1,7 @@
 use common::models::{Alert, AlertSeverity, DetectionRule as RuleModel, TrafficEvent};
 use ipnetwork::IpNetwork;
 use sqlx::PgPool;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{error, info, warn};
@@ -9,15 +10,36 @@ use super::arp_spoof::ArpSpoofDetector;
 use super::beaconing::BeaconingDetector;
 use super::brute_force::BruteForceDetector;
 use super::dns_tunneling::DnsTunnelDetector;
+use super::generic_threshold::GenericThresholdDetector;
 use super::icmp_flood::IcmpFloodDetector;
 use super::port_scan::PortScanDetector;
 use super::syn_flood::SynFloodDetector;
 use super::zscore_anomaly::ZScoreAnomalyDetector;
 use super::DetectionRule;
 
+/// Historical names used by older seeds for the built-in detectors.
+const RULE_ALIASES: [(&str, &str); 2] = [
+    ("Brute-force Attack Detection", "SSH/RDP Brute-Force Detection"),
+    ("ARP Spoofing / Poisoning Detection", "ARP Spoofing Detection"),
+];
+
+fn matches_builtin(builtin: &str, db_name: &str) -> bool {
+    builtin == db_name
+        || RULE_ALIASES
+            .iter()
+            .any(|(b, alias)| *b == builtin && *alias == db_name)
+}
+
 pub struct DetectionEngine {
     rules: Vec<Box<dyn DetectionRule>>,
+    /// DB configuration for each built-in detector (same index as `rules`).
+    rule_configs: Vec<Option<RuleModel>>,
+    /// User-defined rules from the UI, executed by the generic threshold detector.
+    custom_rules: Vec<GenericThresholdDetector>,
+    /// Once rules were loaded from the DB, a built-in without a DB row is treated as deleted.
+    db_synced: bool,
     alert_tx: Sender<Alert>,
+    block_tx: Option<Sender<IpNetwork>>,
 }
 
 impl DetectionEngine {
@@ -32,8 +54,22 @@ impl DetectionEngine {
             Box::new(IcmpFloodDetector::new(50, 5)),
             Box::new(BeaconingDetector::new(6, 0.15)),
         ];
+        let rule_configs = vec![None; rules.len()];
 
-        Self { rules, alert_tx }
+        Self {
+            rules,
+            rule_configs,
+            custom_rules: Vec::new(),
+            db_synced: false,
+            alert_tx,
+            block_tx: None,
+        }
+    }
+
+    /// Enables automated response: source IPs of critical alerts with a trustworthy attribution
+    /// are sent to `block_tx`.
+    pub fn set_block_sender(&mut self, block_tx: Sender<IpNetwork>) {
+        self.block_tx = Some(block_tx);
     }
 
     /// Snapshot all rules state to JSON
@@ -66,7 +102,6 @@ impl DetectionEngine {
         let tmp_path = format!("{}.tmp", path);
         std::fs::write(&tmp_path, content)?;
         std::fs::rename(&tmp_path, path)?;
-        info!("Saved rule state snapshot atomically to {}", path);
         Ok(())
     }
 
@@ -74,12 +109,70 @@ impl DetectionEngine {
     pub fn load_state_from_file(&mut self, path: &str) -> Result<(), std::io::Error> {
         if std::path::Path::new(path).exists() {
             let content = std::fs::read_to_string(path)?;
-            if let Ok(json) = serde_json::from_str(&content) {
-                self.restore_state(&json);
-                info!("Loaded rule state snapshot from {}", path);
+            match serde_json::from_str(&content) {
+                Ok(json) => {
+                    self.restore_state(&json);
+                    info!("Loaded rule state snapshot from {}", path);
+                }
+                Err(e) => warn!("Ignoring corrupt rule state file {}: {}", path, e),
             }
         }
         Ok(())
+    }
+
+    /// Applies the rule set from the database: configures built-in detectors, disables built-ins
+    /// whose rule was deleted, and (re)builds user-defined rules.
+    pub fn apply_rule_configs(&mut self, db_rules: Vec<RuleModel>) {
+        let mut remaining: HashMap<uuid::Uuid, RuleModel> =
+            db_rules.into_iter().map(|r| (r.id, r)).collect();
+
+        for (idx, rule) in self.rules.iter_mut().enumerate() {
+            let found = remaining
+                .values()
+                .find(|r| matches_builtin(rule.name(), &r.name))
+                .map(|r| r.id);
+            match found.and_then(|id| remaining.remove(&id)) {
+                Some(cfg) => {
+                    rule.update_config(&cfg);
+                    self.rule_configs[idx] = Some(cfg);
+                }
+                None => {
+                    if self.rule_configs[idx].is_some() || !self.db_synced {
+                        info!(
+                            "Built-in rule '{}' has no database entry; detector disabled",
+                            rule.name()
+                        );
+                    }
+                    self.rule_configs[idx] = None;
+                }
+            }
+        }
+
+        // Everything left is a custom rule.
+        let mut previous: HashMap<uuid::Uuid, GenericThresholdDetector> = self
+            .custom_rules
+            .drain(..)
+            .map(|d| (d.rule_id(), d))
+            .collect();
+        let mut custom: Vec<GenericThresholdDetector> = remaining
+            .into_values()
+            .map(|cfg| match previous.remove(&cfg.id) {
+                Some(mut existing) => {
+                    existing.update_config(&cfg);
+                    existing
+                }
+                None => GenericThresholdDetector::from_config(&cfg),
+            })
+            .collect();
+        custom.sort_by(|a, b| a.name().cmp(b.name()));
+        self.custom_rules = custom;
+        self.db_synced = true;
+
+        info!(
+            "Rule configuration applied: {} built-in active, {} custom rule(s)",
+            self.rule_configs.iter().filter(|c| c.is_some()).count(),
+            self.custom_rules.len()
+        );
     }
 
     /// Update detection rules dynamically from database configuration
@@ -89,21 +182,7 @@ impl DetectionEngine {
         )
         .fetch_all(pool)
         .await?;
-
-        for db_rule in db_rules {
-            for rule in &mut self.rules {
-                let matches = rule.name() == db_rule.name
-                    || (rule.name() == "Brute-force Attack Detection"
-                        && db_rule.name == "SSH/RDP Brute-Force Detection")
-                    || (rule.name() == "ARP Spoofing / Poisoning Detection"
-                        && db_rule.name == "ARP Spoofing Detection");
-                if matches {
-                    rule.update_config(&db_rule);
-                    info!("Updated configuration for rule: {}", rule.name());
-                }
-            }
-        }
-
+        self.apply_rule_configs(db_rules);
         Ok(())
     }
 
@@ -112,201 +191,226 @@ impl DetectionEngine {
         for rule in &mut self.rules {
             rule.cleanup_stale(max_age);
         }
+        for rule in &mut self.custom_rules {
+            rule.cleanup_stale(max_age);
+        }
+    }
+
+    /// Stamps the DB configuration (rule id, severity, MITRE mapping) onto a detector alert.
+    fn apply_overrides(alert: &mut Alert, cfg: &RuleModel) {
+        alert.rule_id = Some(cfg.id);
+        alert.severity = cfg.severity;
+        if cfg.mitre_tactic.is_some() {
+            alert.mitre_tactic = cfg.mitre_tactic.clone();
+        }
+        if cfg.mitre_technique.is_some() {
+            alert.mitre_technique = cfg.mitre_technique.clone();
+        }
+    }
+
+    async fn emit(&self, alert: Alert, auto_blockable: bool) {
+        info!(
+            "🚨 [ALERT TRIGGERED] {} - {}",
+            alert.title, alert.description
+        );
+        if auto_blockable && alert.severity == AlertSeverity::Critical {
+            if let Some(tx) = &self.block_tx {
+                if tx.try_send(alert.src_ip).is_err() {
+                    warn!("Auto-block queue full; skipping block of {}", alert.src_ip);
+                }
+            }
+        }
+        if let Err(e) = self.alert_tx.send(alert).await {
+            error!("Failed to forward alert to alerting channel: {}", e);
+        }
     }
 
     /// Process a single event through all detection rules
     pub async fn process_event(&mut self, event: &TrafficEvent) {
-        for rule in &mut self.rules {
-            if let Some(alert) = rule.evaluate(event) {
-                info!(
-                    "🚨 [ALERT TRIGGERED] {} - {}",
-                    alert.title, alert.description
-                );
-                if let Err(e) = self.alert_tx.send(alert).await {
-                    error!("Failed to forward alert to alerting channel: {}", e);
-                }
+        let mut produced: Vec<(Alert, bool)> = Vec::new();
+
+        for (idx, rule) in self.rules.iter_mut().enumerate() {
+            let cfg = &self.rule_configs[idx];
+            if self.db_synced && cfg.is_none() {
+                continue; // rule deleted in the UI
             }
+            if let Some(mut alert) = rule.evaluate(event) {
+                if let Some(cfg) = cfg {
+                    Self::apply_overrides(&mut alert, cfg);
+                } else {
+                    alert.rule_id = None;
+                }
+                produced.push((alert, rule.last_alert_auto_blockable()));
+            }
+        }
+        for rule in &mut self.custom_rules {
+            if let Some(alert) = rule.evaluate(event) {
+                produced.push((alert, rule.last_alert_auto_blockable()));
+            }
+        }
+
+        for (alert, blockable) in produced {
+            self.emit(alert, blockable).await;
         }
     }
 
     /// Process a batch of events (optimized for high-throughput pipeline > 10,000 pkts/sec)
     pub async fn process_batch(&mut self, events: &[TrafficEvent]) {
         for event in events {
-            for rule in &mut self.rules {
-                if let Some(alert) = rule.evaluate(event) {
-                    info!(
-                        "🚨 [ALERT TRIGGERED] {} - {}",
-                        alert.title, alert.description
-                    );
-                    if let Err(e) = self.alert_tx.send(alert).await {
-                        error!("Failed to forward alert to alerting channel: {}", e);
-                    }
-                }
-            }
+            self.process_event(event).await;
         }
     }
 }
 
-/// Check if an IP address belongs to the infrastructure allowlist (Mục 17)
+/// Infrastructure allowlist that auto-response must never block (Mục 17).
+/// `ALLOWLIST_IPS` accepts comma-separated IPs or CIDRs and replaces the defaults.
 pub fn is_allowlisted_ip(ip: &IpNetwork) -> bool {
-    let ip_addr = ip.ip();
-    if ip_addr.is_loopback() {
+    let addr = ip.ip();
+    if addr.is_loopback() || addr.is_unspecified() || addr.is_multicast() {
         return true;
     }
-    let ip_str = ip_addr.to_string();
-    if ip_str == "192.168.1.1" || ip_str == "8.8.8.8" || ip_str == "1.1.1.1" {
-        return true;
-    }
-    if let Ok(allowlist) = std::env::var("ALLOWLIST_IPS") {
-        for allowed in allowlist.split(',') {
-            if allowed.trim() == ip_str {
-                return true;
+    let list = std::env::var("ALLOWLIST_IPS")
+        .unwrap_or_else(|_| "192.168.1.1,8.8.8.8,8.8.4.4,1.1.1.1".to_string());
+    list.split(',')
+        .filter_map(|s| s.trim().parse::<IpNetwork>().ok())
+        .any(|net| net.contains(addr))
+}
+
+/// Records an automated block in `blocked_ips` for 2 hours.
+pub fn spawn_auto_blocker(mut block_rx: Receiver<IpNetwork>, pool: Option<Arc<PgPool>>) {
+    tokio::spawn(async move {
+        while let Some(ip) = block_rx.recv().await {
+            if is_allowlisted_ip(&ip) {
+                info!(
+                    "🛡️ [AUTO-RESPONSE] IP {} is in allowlist, skipping automated block.",
+                    ip
+                );
+                continue;
+            }
+            let Some(ref pool) = pool else { continue };
+            let res = sqlx::query(
+                r#"
+                INSERT INTO blocked_ips (ip_address, reason, blocked_until)
+                VALUES ($1, $2, CURRENT_TIMESTAMP + INTERVAL '2 hours')
+                ON CONFLICT (ip_address) DO UPDATE
+                SET reason = EXCLUDED.reason,
+                    blocked_until = GREATEST(blocked_ips.blocked_until, EXCLUDED.blocked_until)
+                "#,
+            )
+            .bind(ip)
+            .bind("Auto-blocked by SecNet IPS after a critical alert")
+            .execute(pool.as_ref())
+            .await;
+            match res {
+                Ok(_) => info!("🔒 [AUTO-RESPONSE] {} added to blocklist for 2 hours", ip),
+                Err(e) => warn!("Failed to auto-insert IP into blocked_ips table: {}", e),
             }
         }
-    }
-    false
+    });
 }
 
-/// Helper to trigger active OS firewall blocking (iptables / nftables)
-pub async fn apply_os_firewall_block(ip: IpNetwork) {
-    let ip_str = ip.ip().to_string();
-    info!(
-        "🛡️ [AUTO-RESPONSE FIREWALL] Auto-blocking malicious IP {} via OS firewall",
-        ip_str
-    );
-
-    // 1. Try nftables
-    let nft_result = tokio::process::Command::new("nft")
-        .args([
-            "add",
-            "element",
-            "inet",
-            "filter",
-            "secnet_blocklist",
-            &format!("{{ {} }}", ip_str),
-        ])
-        .output()
-        .await;
-
-    if let Ok(out) = nft_result {
-        if out.status.success() {
-            info!("✅ Successfully blocked IP {} via nftables", ip_str);
-            return;
-        }
-    }
-
-    // 2. Fallback to iptables
-    let is_ipv6 = ip.is_ipv6();
-    let iptables_cmd = if is_ipv6 { "ip6tables" } else { "iptables" };
-    let ipt_result = tokio::process::Command::new(iptables_cmd)
-        .args(["-I", "INPUT", "-s", &ip_str, "-j", "DROP"])
-        .output()
-        .await;
-
-    match ipt_result {
-        Ok(out) if out.status.success() => {
-            info!("✅ Successfully blocked IP {} via {}", ip_str, iptables_cmd);
-        }
-        Ok(out) => {
-            let err = String::from_utf8_lossy(&out.stderr);
-            warn!(
-                "⚠️ Firewall command failed (status: {}): {}. Running without CAP_NET_ADMIN/root?",
-                out.status,
-                err.trim()
-            );
-        }
-        Err(e) => {
-            warn!(
-                "⚠️ Firewall command execution failed: {}. Continuing with database blocklist.",
-                e
-            );
-        }
-    }
+async fn insert_alert(pool: &PgPool, alert: &Alert, rule_id: Option<uuid::Uuid>) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        INSERT INTO alerts (id, rule_id, severity, title, description, src_ip, dst_ip, detected_at, status, mitre_tactic, mitre_technique)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        "#,
+    )
+    .bind(alert.id)
+    .bind(rule_id)
+    .bind(alert.severity)
+    .bind(&alert.title)
+    .bind(&alert.description)
+    .bind(alert.src_ip)
+    .bind(alert.dst_ip)
+    .bind(alert.detected_at)
+    .bind(alert.status)
+    .bind(&alert.mitre_tactic)
+    .bind(&alert.mitre_technique)
+    .execute(pool)
+    .await
+    .map(|_| ())
 }
 
-/// Spawns background task to persist alerts to PostgreSQL, auto-block critical attackers, and dispatch them
+/// Persists alerts. The `alerts` INSERT trigger publishes each new alert to the backend
+/// (`pg_notify('new_alert')`), so no extra notification is sent here.
 pub fn spawn_alert_persister(mut alert_rx: Receiver<Alert>, pool: Option<Arc<PgPool>>) {
-    let auto_block_enabled = std::env::var("AUTO_BLOCK_CRITICAL_IPS")
-        .map(|v| v != "false" && v != "0")
-        .unwrap_or(true);
-
     tokio::spawn(async move {
         while let Some(alert) = alert_rx.recv().await {
-            // Auto-Response: If alert is Critical, auto-block attacker IP (if not in allowlist) (Mục 17)
-            if auto_block_enabled && alert.severity == AlertSeverity::Critical {
-                if is_allowlisted_ip(&alert.src_ip) {
-                    info!(
-                        "🛡️ [AUTO-RESPONSE] IP {} is in allowlist, skipping automated block.",
-                        alert.src_ip
-                    );
-                } else {
-                    info!("🚨 [AUTO-RESPONSE] Critical threat identified! Initiating automated response for IP {}", alert.src_ip);
+            let Some(ref pool) = pool else { continue };
+            let mut result = insert_alert(pool, &alert, alert.rule_id).await;
 
-                    // 1. Apply OS firewall block
-                    apply_os_firewall_block(alert.src_ip).await;
-
-                    // 2. Insert into database blocked_ips table
-                    if let Some(ref pool) = pool {
-                        let block_reason = format!(
-                            "Auto-blocked by SecNet IPS due to Critical Alert: {}",
-                            alert.title
-                        );
-                        let block_res = sqlx::query(
-                            r#"
-                            INSERT INTO blocked_ips (ip_address, reason, blocked_until)
-                            VALUES ($1, $2, CURRENT_TIMESTAMP + INTERVAL '2 hours')
-                            ON CONFLICT (ip_address) DO UPDATE SET blocked_until = CURRENT_TIMESTAMP + INTERVAL '2 hours'
-                            "#,
-                        )
-                        .bind(alert.src_ip)
-                        .bind(block_reason)
-                        .execute(pool.as_ref())
-                        .await;
-
-                        if let Err(e) = block_res {
-                            warn!("Failed to auto-insert IP into blocked_ips table: {}", e);
-                        } else {
-                            info!(
-                                "🔒 Malicious IP {} registered in blocked_ips table (2h lockout)",
-                                alert.src_ip
-                            );
-                        }
-                    }
+            // The rule may have been deleted between detection and insert: keep the alert.
+            if let Err(sqlx::Error::Database(ref db_err)) = result {
+                if db_err.is_foreign_key_violation() && alert.rule_id.is_some() {
+                    warn!("Rule of alert {} no longer exists; storing without rule link", alert.id);
+                    result = insert_alert(pool, &alert, None).await;
                 }
             }
 
-            if let Some(ref pool) = pool {
-                let result = sqlx::query(
-                    r#"
-                    INSERT INTO alerts (id, rule_id, severity, title, description, src_ip, dst_ip, detected_at, status, mitre_tactic, mitre_technique)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-                    "#,
-                )
-                .bind(alert.id)
-                .bind(alert.rule_id)
-                .bind(alert.severity)
-                .bind(&alert.title)
-                .bind(&alert.description)
-                .bind(alert.src_ip)
-                .bind(alert.dst_ip)
-                .bind(alert.detected_at)
-                .bind(alert.status)
-                .bind(&alert.mitre_tactic)
-                .bind(&alert.mitre_technique)
-                .execute(pool.as_ref())
-                .await;
+            match result {
+                Ok(()) => info!("Persisted alert {} successfully to database", alert.id),
+                Err(e) => warn!("Failed to persist alert to database: {}", e),
+            }
+        }
+    });
+}
 
-                if let Err(e) = result {
-                    warn!("Failed to persist alert to database: {}", e);
-                } else {
-                    info!("Persisted alert {} successfully to database", alert.id);
-                    // Explicitly broadcast alert event to PgListener (Mục 1)
-                    let _ = sqlx::query("SELECT pg_notify('new_alert', $1)")
-                        .bind(alert.id.to_string())
-                        .execute(pool.as_ref())
-                        .await;
+/// Mirrors the active blocklist into a dedicated iptables/ip6tables chain (`SECNET_BLOCK`),
+/// rebuilding it every `interval`. Requires CAP_NET_ADMIN in the *host* network namespace
+/// (`network_mode: host`); only enabled with `FIREWALL_ENFORCEMENT=true`.
+pub fn spawn_firewall_sync(pool: Arc<PgPool>, interval: std::time::Duration) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(interval);
+        loop {
+            ticker.tick().await;
+            let ips: Vec<IpNetwork> = match sqlx::query_scalar(
+                "SELECT ip_address FROM blocked_ips WHERE blocked_until IS NULL OR blocked_until > NOW()",
+            )
+            .fetch_all(pool.as_ref())
+            .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    warn!("Firewall sync: cannot read blocklist: {}", e);
+                    continue;
+                }
+            };
+            for (cmd, v6) in [("iptables", false), ("ip6tables", true)] {
+                let wanted: Vec<String> = ips
+                    .iter()
+                    .filter(|ip| ip.is_ipv6() == v6)
+                    .map(|ip| ip.to_string())
+                    .collect();
+                if let Err(e) = sync_chain(cmd, &wanted).await {
+                    warn!("Firewall sync via {} failed: {}", cmd, e);
                 }
             }
         }
     });
+}
+
+async fn run(cmd: &str, args: &[&str]) -> Result<bool, String> {
+    tokio::process::Command::new(cmd)
+        .args(args)
+        .output()
+        .await
+        .map(|o| o.status.success())
+        .map_err(|e| e.to_string())
+}
+
+async fn sync_chain(cmd: &str, ips: &[String]) -> Result<(), String> {
+    const CHAIN: &str = "SECNET_BLOCK";
+    // Create the chain (fails harmlessly if it exists) and hook it into INPUT once.
+    let _ = run(cmd, &["-N", CHAIN]).await?;
+    if !run(cmd, &["-C", "INPUT", "-j", CHAIN]).await? {
+        run(cmd, &["-I", "INPUT", "-j", CHAIN]).await?;
+    }
+    if !run(cmd, &["-F", CHAIN]).await? {
+        return Err(format!("cannot flush {} (missing CAP_NET_ADMIN?)", CHAIN));
+    }
+    for ip in ips {
+        run(cmd, &["-A", CHAIN, "-s", ip, "-j", "DROP"]).await?;
+    }
+    Ok(())
 }

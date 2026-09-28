@@ -4,6 +4,7 @@ use common::models::{
 };
 use ipnetwork::IpNetwork;
 use std::collections::{HashMap, VecDeque};
+use chrono::{DateTime, Utc as ChronoUtc};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
@@ -16,8 +17,8 @@ pub struct BeaconingDetector {
     is_enabled: bool,
     min_connections: usize,
     max_jitter_ratio: f64, // Coefficient of variation threshold (std_dev / mean)
-    // (src_ip, dst_ip) -> history of connection timestamps
-    history: HashMap<(IpNetwork, IpNetwork), VecDeque<Instant>>,
+    // (src_ip, dst_ip) -> history of connection timestamps (packet capture time)
+    history: HashMap<(IpNetwork, IpNetwork), VecDeque<DateTime<ChronoUtc>>>,
     last_alert_time: HashMap<(IpNetwork, IpNetwork), Instant>,
 }
 
@@ -34,7 +35,7 @@ impl BeaconingDetector {
     }
 
     /// Evaluates if the sequence of intervals represents periodic beaconing
-    fn check_beaconing(&self, timestamps: &VecDeque<Instant>) -> Option<(f64, f64)> {
+    fn check_beaconing(&self, timestamps: &VecDeque<DateTime<ChronoUtc>>) -> Option<(f64, f64)> {
         if timestamps.len() < self.min_connections {
             return None;
         }
@@ -42,15 +43,16 @@ impl BeaconingDetector {
         // Calculate delta intervals between consecutive connections in seconds
         let mut intervals = Vec::with_capacity(timestamps.len() - 1);
         for i in 1..timestamps.len() {
-            let dt = timestamps[i]
-                .duration_since(timestamps[i - 1])
-                .as_secs_f64();
+            let dt = (timestamps[i] - timestamps[i - 1])
+                .to_std()
+                .map(|d| d.as_secs_f64())
+                .unwrap_or(0.0);
             if dt >= 0.01 {
                 intervals.push(dt);
             }
         }
 
-        if intervals.len() < self.min_connections - 1 {
+        if intervals.len() + 1 < self.min_connections {
             return None;
         }
 
@@ -98,6 +100,12 @@ impl DetectionRule for BeaconingDetector {
     fn update_config(&mut self, config: &RuleModel) {
         self.rule_id = Some(config.id);
         self.is_enabled = config.is_enabled;
+        // threshold_value = minimum number of periodic connections; condition_json.max_jitter =
+        // maximum coefficient of variation of the intervals.
+        self.min_connections = (config.threshold_value.max(3.0) as usize).min(20);
+        if let Some(j) = super::condition_f64(config, "max_jitter") {
+            self.max_jitter_ratio = j.clamp(0.01, 1.0);
+        }
     }
 
     fn evaluate(&mut self, event: &TrafficEvent) -> Option<Alert> {
@@ -123,7 +131,7 @@ impl DetectionRule for BeaconingDetector {
             if timestamps.len() >= 20 {
                 timestamps.pop_front();
             }
-            timestamps.push_back(now);
+            timestamps.push_back(event.time);
         }
 
         let beacon_analysis = self
@@ -165,9 +173,10 @@ impl DetectionRule for BeaconingDetector {
 
     fn cleanup_stale(&mut self, max_age: Duration) {
         let now = Instant::now();
+        let cutoff = ChronoUtc::now() - chrono::Duration::from_std(max_age).unwrap_or_default();
         self.history.retain(|_, timestamps| {
             while let Some(&oldest) = timestamps.front() {
-                if now.duration_since(oldest) > max_age {
+                if oldest < cutoff {
                     timestamps.pop_front();
                 } else {
                     break;

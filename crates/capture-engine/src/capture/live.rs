@@ -3,20 +3,27 @@ use common::models::TrafficEvent;
 use ipnetwork::IpNetwork;
 use pnet::datalink::{self, Channel::Ethernet, NetworkInterface};
 use pnet::packet::arp::ArpPacket;
-use pnet::packet::ethernet::{EtherTypes, EthernetPacket};
+use pnet::packet::ethernet::{EtherType, EtherTypes, EthernetPacket};
+use pnet::packet::ip::IpNextHeaderProtocol;
 use pnet::packet::ip::IpNextHeaderProtocols;
 use pnet::packet::ipv4::Ipv4Packet;
 use pnet::packet::ipv6::Ipv6Packet;
 use pnet::packet::tcp::TcpPacket;
 use pnet::packet::udp::UdpPacket;
 use pnet::packet::Packet;
+use std::net::IpAddr;
+use std::sync::Arc;
 use std::thread;
 use tokio::sync::mpsc::{channel, Receiver};
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
-use super::PacketSource;
+use super::{PacketSource, SensorStats};
+
+/// 802.1Q / 802.1ad VLAN tag EtherTypes.
+const ETHERTYPE_VLAN: u16 = 0x8100;
+const ETHERTYPE_QINQ: u16 = 0x88a8;
 
 pub struct LiveCapture {
     pub interface_name: String,
@@ -24,7 +31,14 @@ pub struct LiveCapture {
 }
 
 impl LiveCapture {
-    pub fn new(interface_name: &str) -> Result<Self, String> {
+    /// `exclusions` lists (IP, port) endpoints whose traffic is ignored — the capture engine's own
+    /// database / Redis connections — to avoid a feedback loop, without blinding detection to
+    /// other hosts using the same ports.
+    pub fn new(
+        interface_name: &str,
+        exclusions: Vec<(IpAddr, u16)>,
+        stats: Arc<SensorStats>,
+    ) -> Result<Self, String> {
         let interfaces = datalink::interfaces();
         let interface = interfaces
             .into_iter()
@@ -33,33 +47,55 @@ impl LiveCapture {
 
         let (tx, rx) = channel::<TrafficEvent>(10000);
         let iface_name = interface_name.to_string();
+        let stats = stats.clone();
 
         thread::spawn(move || {
             let (_, mut rx_channel) = match datalink::channel(&interface, Default::default()) {
                 Ok(Ethernet(tx, rx)) => (tx, rx),
                 Ok(_) => {
                     error!("Unhandled channel type on interface {}", iface_name);
+                    stats.mark_failed();
                     return;
                 }
                 Err(e) => {
-                    warn!("Failed to create datalink channel (requires root/CAP_NET_RAW): {}. Fallback to simulated mode recommended.", e);
+                    error!("Failed to open datalink channel on {} (requires root/CAP_NET_RAW): {}", iface_name, e);
+                    stats.mark_failed();
                     return;
                 }
             };
 
             info!("Live packet capture started on interface {}", iface_name);
 
+            let mut consecutive_errors = 0u32;
             loop {
                 match rx_channel.next() {
                     Ok(packet) => {
+                        consecutive_errors = 0;
                         if let Some(event) = Self::parse_ethernet_frame(packet, &iface_name) {
-                            if tx.blocking_send(event).is_err() {
-                                break;
+                            if Self::is_excluded(&event, &exclusions) {
+                                continue;
+                            }
+                            if let Err(e) = tx.try_send(event) {
+                                match e {
+                                    tokio::sync::mpsc::error::TrySendError::Full(_) => {
+                                        stats.record_dropped(1)
+                                    }
+                                    tokio::sync::mpsc::error::TrySendError::Closed(_) => break,
+                                }
                             }
                         }
                     }
                     Err(e) => {
-                        warn!("Error reading packet: {}", e);
+                        consecutive_errors += 1;
+                        if consecutive_errors == 1 || consecutive_errors % 100 == 0 {
+                            warn!("Error reading packet ({} consecutive): {}", consecutive_errors, e);
+                        }
+                        if consecutive_errors >= 1000 {
+                            error!("Live capture on {} keeps failing; marking sensor as failed", iface_name);
+                            stats.mark_failed();
+                            break;
+                        }
+                        thread::sleep(std::time::Duration::from_millis(10));
                     }
                 }
             }
@@ -69,6 +105,38 @@ impl LiveCapture {
             interface_name: interface_name.to_string(),
             receiver: Mutex::new(rx),
         })
+    }
+
+    fn is_excluded(event: &TrafficEvent, exclusions: &[(IpAddr, u16)]) -> bool {
+        exclusions.iter().any(|(ip, port)| {
+            let port = *port as i32;
+            (event.dst_ip.ip() == *ip && event.dst_port == port)
+                || (event.src_ip.ip() == *ip && event.src_port == port)
+        })
+    }
+
+    /// Walks IPv6 extension headers (hop-by-hop, routing, destination options) to the L4 header.
+    fn skip_ipv6_extensions(
+        mut next: IpNextHeaderProtocol,
+        mut data: &[u8],
+    ) -> Option<(IpNextHeaderProtocol, &[u8])> {
+        for _ in 0..8 {
+            match next.0 {
+                0 | 43 | 60 => {
+                    if data.len() < 8 {
+                        return None;
+                    }
+                    let len = (data[1] as usize + 1) * 8;
+                    if data.len() < len {
+                        return None;
+                    }
+                    next = IpNextHeaderProtocol(data[0]);
+                    data = &data[len..];
+                }
+                _ => return Some((next, data)),
+            }
+        }
+        None
     }
 
     /// Extract DNS query domain from UDP payload (offset 12 is question section)
@@ -100,10 +168,17 @@ impl LiveCapture {
 
     fn parse_ethernet_frame(packet: &[u8], iface: &str) -> Option<TrafficEvent> {
         let eth = EthernetPacket::new(packet)?;
-        let eth_payload = eth.payload();
+        let mut ethertype = eth.get_ethertype().0;
+        let mut eth_payload = eth.payload();
+        // Strip (possibly stacked) VLAN tags.
+        while (ethertype == ETHERTYPE_VLAN || ethertype == ETHERTYPE_QINQ) && eth_payload.len() >= 4 {
+            ethertype = u16::from_be_bytes([eth_payload[2], eth_payload[3]]);
+            eth_payload = &eth_payload[4..];
+        }
+        let ethertype = EtherType(ethertype);
 
         // 1. Support ARP Packet Parsing (Mục 3)
-        if eth.get_ethertype() == EtherTypes::Arp {
+        if ethertype == EtherTypes::Arp {
             if let Some(arp) = ArpPacket::new(eth_payload) {
                 let src =
                     IpNetwork::new(std::net::IpAddr::V4(arp.get_sender_proto_addr()), 32).ok()?;
@@ -126,7 +201,7 @@ impl LiveCapture {
             return None;
         }
 
-        let (src_ip, dst_ip, next_protocol, l4_payload) = match eth.get_ethertype() {
+        let (src_ip, dst_ip, next_protocol, l4_payload) = match ethertype {
             EtherTypes::Ipv4 => {
                 let ip = Ipv4Packet::new(eth_payload)?;
                 let src = IpNetwork::new(std::net::IpAddr::V4(ip.get_source()), 32).ok()?;
@@ -149,7 +224,8 @@ impl LiveCapture {
                 if eth_payload.len() < 40 {
                     return None;
                 }
-                (src, dst, ip.get_next_header(), &eth_payload[40..])
+                let (next, l4) = Self::skip_ipv6_extensions(ip.get_next_header(), &eth_payload[40..])?;
+                (src, dst, next, l4)
             }
             _ => return None,
         };
@@ -206,11 +282,6 @@ impl LiveCapture {
                 protocol = "ICMPv6".to_string();
             }
             _ => {}
-        }
-
-        // Ignore internal infrastructure traffic to avoid feedback loops (DB: 5432, Redis: 6379) (Mục C1.4)
-        if src_port == 5432 || dst_port == 5432 || src_port == 6379 || dst_port == 6379 {
-            return None;
         }
 
         Some(TrafficEvent {
