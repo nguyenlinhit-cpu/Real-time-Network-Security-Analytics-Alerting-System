@@ -5,7 +5,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use super::{
-    email::EmailChannel, telegram::TelegramChannel, throttler::AlertThrottler,
+    email::EmailChannel, slack::SlackChannel, telegram::TelegramChannel, throttler::AlertThrottler,
     traits::NotificationChannel, webhook::WebhookChannel,
 };
 use crate::error::AppError;
@@ -64,7 +64,7 @@ fn build_channel(ch: &ChannelModel) -> Box<dyn NotificationChannel> {
                 .as_str()
                 .unwrap_or("")
                 .to_string();
-            Box::new(WebhookChannel::new(ch.name.clone(), url))
+            Box::new(SlackChannel::new(ch.name.clone(), url))
         }
     }
 }

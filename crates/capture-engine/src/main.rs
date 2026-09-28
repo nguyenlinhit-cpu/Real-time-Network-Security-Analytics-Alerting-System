@@ -232,51 +232,85 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             loop {
-                // If "all", periodically rotate all 6 attack scenarios
-                if scenario_type.eq_ignore_ascii_case("all") && packet_count.is_multiple_of(50) {
-                    match scenario_idx % 6 {
-                        0 => {
-                            info!("▶️ [DEMO SCENARIO] Triggering Port Scan attack against 192.168.1.50");
-                            sim.set_scenario(AttackScenario::PortScan {
+                // If "all", periodically rotate all 6 attack scenarios; otherwise periodically re-arm the selected demo scenario
+                if packet_count.is_multiple_of(60) {
+                    if scenario_type.eq_ignore_ascii_case("all") {
+                        match scenario_idx % 6 {
+                            0 => {
+                                info!("▶️ [DEMO SCENARIO] Triggering Port Scan attack against 192.168.1.50");
+                                sim.set_scenario(AttackScenario::PortScan {
+                                    target_ip,
+                                    start_port: 20,
+                                    port_count: 30,
+                                });
+                            }
+                            1 => {
+                                info!("▶️ [DEMO SCENARIO] Triggering SYN Flood attack against 192.168.1.50");
+                                sim.set_scenario(AttackScenario::SynFlood {
+                                    target_ip,
+                                    packet_count: 250,
+                                });
+                            }
+                            2 => {
+                                info!("▶️ [DEMO SCENARIO] Triggering SSH Brute-Force attack against 192.168.1.50:22");
+                                sim.set_scenario(AttackScenario::BruteForce {
+                                    target_ip,
+                                    port: 22,
+                                    attempts: 10,
+                                });
+                            }
+                            3 => {
+                                info!(
+                                    "▶️ [DEMO SCENARIO] Triggering ARP Spoofing attack on 192.168.1.1"
+                                );
+                                sim.set_scenario(AttackScenario::ArpSpoof {
+                                    target_ip: "192.168.1.1/32".parse().unwrap(),
+                                    fake_mac: "de:ad:be:ef:00:01".to_string(),
+                                });
+                            }
+                            4 => {
+                                info!("▶️ [DEMO SCENARIO] Triggering DNS Tunneling exfiltration via 8.8.8.8");
+                                sim.set_scenario(AttackScenario::DnsTunneling { query_count: 15 });
+                            }
+                            _ => {
+                                info!("▶️ [DEMO SCENARIO] Triggering Traffic Volume Spike (Z-Score Anomaly)");
+                                sim.set_scenario(AttackScenario::TrafficVolumeSpike {
+                                    multiplier: 10,
+                                });
+                            }
+                        }
+                        scenario_idx += 1;
+                    } else {
+                        match scenario_type.to_lowercase().as_str() {
+                            "port_scan" => sim.set_scenario(AttackScenario::PortScan {
                                 target_ip,
                                 start_port: 20,
                                 port_count: 30,
-                            });
-                        }
-                        1 => {
-                            info!("▶️ [DEMO SCENARIO] Triggering SYN Flood attack against 192.168.1.50");
-                            sim.set_scenario(AttackScenario::SynFlood {
+                            }),
+                            "syn_flood" => sim.set_scenario(AttackScenario::SynFlood {
                                 target_ip,
                                 packet_count: 250,
-                            });
-                        }
-                        2 => {
-                            info!("▶️ [DEMO SCENARIO] Triggering SSH Brute-Force attack against 192.168.1.50:22");
-                            sim.set_scenario(AttackScenario::BruteForce {
+                            }),
+                            "brute_force" => sim.set_scenario(AttackScenario::BruteForce {
                                 target_ip,
                                 port: 22,
                                 attempts: 10,
-                            });
-                        }
-                        3 => {
-                            info!(
-                                "▶️ [DEMO SCENARIO] Triggering ARP Spoofing attack on 192.168.1.1"
-                            );
-                            sim.set_scenario(AttackScenario::ArpSpoof {
+                            }),
+                            "arp_spoof" => sim.set_scenario(AttackScenario::ArpSpoof {
                                 target_ip: "192.168.1.1/32".parse().unwrap(),
                                 fake_mac: "de:ad:be:ef:00:01".to_string(),
-                            });
-                        }
-                        4 => {
-                            info!("▶️ [DEMO SCENARIO] Triggering DNS Tunneling exfiltration via 8.8.8.8");
-                            sim.set_scenario(AttackScenario::DnsTunneling { query_count: 15 });
-                        }
-                        _ => {
-                            info!("▶️ [DEMO SCENARIO] Triggering Traffic Volume Spike (Z-Score Anomaly)");
-                            sim.set_scenario(AttackScenario::TrafficVolumeSpike { multiplier: 10 });
+                            }),
+                            "dns_tunnel" | "dns_tunneling" => {
+                                sim.set_scenario(AttackScenario::DnsTunneling { query_count: 15 })
+                            }
+                            "volume_spike" => {
+                                sim.set_scenario(AttackScenario::TrafficVolumeSpike {
+                                    multiplier: 10,
+                                })
+                            }
+                            _ => {}
                         }
                     }
-                    scenario_idx += 1;
                 }
 
                 if let Some(event) = sim.next_event().await {

@@ -105,9 +105,9 @@ impl DetectionRule for BeaconingDetector {
             return None;
         }
 
-        // Focus on outbound connection initiations (TCP SYN or UDP packets)
+        // Focus on outbound connection initiations (TCP SYN or non-service UDP packets)
         let is_syn = event.flags.contains("SYN") && !event.flags.contains("ACK");
-        let is_udp = event.protocol == "UDP";
+        let is_udp = event.protocol == "UDP" && event.dst_port != 53 && event.dst_port != 123;
 
         if !is_syn && !is_udp {
             return None;

@@ -67,12 +67,11 @@ impl DetectionRule for BruteForceDetector {
             return None;
         }
 
-        // Check for connection reset/failed attempts or repetitive probes
-        let is_failed_or_short = event.flags.contains("RST")
-            || event.flags.contains("SYN")
-            || event.bytes_transferred < 300;
+        // Check for connection reset/failed attempts or new connection initiations (SYN without established ACK)
+        let is_failed_or_new = event.flags.contains("RST")
+            || (event.flags.contains("SYN") && !event.flags.contains("ACK"));
 
-        if !is_failed_or_short {
+        if !is_failed_or_new {
             return None;
         }
 

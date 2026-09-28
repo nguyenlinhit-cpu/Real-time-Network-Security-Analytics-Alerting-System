@@ -64,26 +64,33 @@ impl NotificationChannel for TelegramChannel {
                 self.base_url.trim_end_matches('/'),
                 self.bot_token
             );
+            let escape_html = |input: &str| -> String {
+                input
+                    .replace('&', "&amp;")
+                    .replace('<', "&lt;")
+                    .replace('>', "&gt;")
+            };
+
             let text = format!(
-                "🚨 *[SecNet Security Alert]*\n\
-                 *Severity:* `{:?}`\n\
-                 *Title:* {}\n\
-                 *Description:* {}\n\
-                 *Source IP:* `{}`\n\
-                 *Target IP:* `{}`\n\
-                 *Detected:* `{}`",
+                "🚨 <b>[SecNet Security Alert]</b>\n\
+                 <b>Severity:</b> <code>{:?}</code>\n\
+                 <b>Title:</b> {}\n\
+                 <b>Description:</b> {}\n\
+                 <b>Source IP:</b> <code>{}</code>\n\
+                 <b>Target IP:</b> <code>{}</code>\n\
+                 <b>Detected:</b> <code>{}</code>",
                 alert.severity,
-                alert.title,
-                alert.description,
-                alert.src_ip,
-                alert.dst_ip,
+                escape_html(&alert.title),
+                escape_html(&alert.description),
+                escape_html(&alert.src_ip.to_string()),
+                escape_html(&alert.dst_ip.to_string()),
                 alert.detected_at.to_rfc3339()
             );
 
             let payload = json!({
                 "chat_id": self.chat_id,
                 "text": text,
-                "parse_mode": "Markdown"
+                "parse_mode": "HTML"
             });
 
             info!(

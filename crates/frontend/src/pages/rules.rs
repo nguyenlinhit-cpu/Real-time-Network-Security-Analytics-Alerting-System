@@ -59,6 +59,20 @@ pub fn RulesPage() -> impl IntoView {
         });
     };
 
+    let on_delete_rule = move |id: Uuid| {
+        leptos::task::spawn_local(async move {
+            match ApiClient::delete_rule(id).await {
+                Ok(_) => {
+                    set_rules.update(|list| list.retain(|r| r.id != id));
+                    set_status_msg.set(Some("Rule deleted successfully".to_string()));
+                }
+                Err(e) => {
+                    set_status_msg.set(Some(format!("Failed to delete rule: {}", e)));
+                }
+            }
+        });
+    };
+
     let on_create_rule = move |e: web_sys::SubmitEvent| {
         e.prevent_default();
         let name = new_name.get();
@@ -292,19 +306,30 @@ pub fn RulesPage() -> impl IntoView {
                                             </span>
                                         </div>
 
-                                        // Toggle Switch
-                                        <button
-                                            class=move || {
-                                                if is_enabled {
-                                                    "px-3 py-1 rounded-full text-[11px] font-mono font-semibold bg-brand/15 text-brand border border-brand/30 transition-colors"
-                                                } else {
-                                                    "px-3 py-1 rounded-full text-[11px] font-mono font-semibold bg-ink-800 text-ink-500 border border-ink-600 transition-colors"
+                                        <div class="flex items-center gap-2">
+                                            // Delete Button
+                                            <button
+                                                class="px-2 py-1 rounded text-[11px] font-mono font-semibold text-ink-500 hover:text-sev-critical hover:bg-sev-critical/10 transition-colors"
+                                                title="Delete rule"
+                                                on:click=move |_| on_delete_rule(rule_id)
+                                            >
+                                                "DELETE"
+                                            </button>
+
+                                            // Toggle Switch
+                                            <button
+                                                class=move || {
+                                                    if is_enabled {
+                                                        "px-3 py-1 rounded-full text-[11px] font-mono font-semibold bg-brand/15 text-brand border border-brand/30 transition-colors"
+                                                    } else {
+                                                        "px-3 py-1 rounded-full text-[11px] font-mono font-semibold bg-ink-800 text-ink-500 border border-ink-600 transition-colors"
+                                                    }
                                                 }
-                                            }
-                                            on:click=move |_| on_toggle_rule(rule_id, is_enabled)
-                                        >
-                                            {if is_enabled { "ACTIVE" } else { "DISABLED" }}
-                                        </button>
+                                                on:click=move |_| on_toggle_rule(rule_id, is_enabled)
+                                            >
+                                                {if is_enabled { "ACTIVE" } else { "DISABLED" }}
+                                            </button>
+                                        </div>
                                     </div>
 
                                     <h3 class="text-base font-bold text-white tracking-tight">

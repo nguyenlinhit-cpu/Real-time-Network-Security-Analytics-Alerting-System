@@ -73,6 +73,10 @@ pub async fn add_to_blocklist(
         r#"
         INSERT INTO blocked_ips (ip_address, reason, blocked_until)
         VALUES ($1, $2, $3)
+        ON CONFLICT (ip_address) DO UPDATE
+        SET reason = EXCLUDED.reason,
+            blocked_until = EXCLUDED.blocked_until,
+            blocked_at = CURRENT_TIMESTAMP
         RETURNING id, ip_address, reason, blocked_at, blocked_until
         "#,
     )
