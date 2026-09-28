@@ -7,7 +7,7 @@ use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
-use super::DetectionRule;
+use super::{threshold_count, window_secs, DetectionRule};
 
 pub struct BruteForceDetector {
     rule_id: Option<Uuid>,
@@ -54,8 +54,23 @@ impl DetectionRule for BruteForceDetector {
     fn update_config(&mut self, config: &RuleModel) {
         self.rule_id = Some(config.id);
         self.is_enabled = config.is_enabled;
-        self.threshold_attempts = config.threshold_value as usize;
-        self.window_duration = Duration::from_secs(config.time_window_seconds.max(1) as u64);
+        self.threshold_attempts = threshold_count(config);
+        self.window_duration = Duration::from_secs(window_secs(config));
+        if let Some(ports) = config
+            .condition_json
+            .get("dst_ports")
+            .and_then(|v| v.as_array())
+        {
+            let parsed: Vec<i32> = ports
+                .iter()
+                .filter_map(|p| p.as_i64())
+                .filter(|p| (1..=65535).contains(p))
+                .map(|p| p as i32)
+                .collect();
+            if !parsed.is_empty() {
+                self.sensitive_ports = parsed;
+            }
+        }
     }
 
     fn evaluate(&mut self, event: &TrafficEvent) -> Option<Alert> {

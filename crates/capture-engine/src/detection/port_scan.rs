@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
-use super::DetectionRule;
+use super::{threshold_count, window_secs, DetectionRule};
 
 pub struct PortScanDetector {
     rule_id: Option<Uuid>,
@@ -52,8 +52,8 @@ impl DetectionRule for PortScanDetector {
     fn update_config(&mut self, config: &RuleModel) {
         self.rule_id = Some(config.id);
         self.is_enabled = config.is_enabled;
-        self.threshold_ports = config.threshold_value as usize;
-        self.window_duration = Duration::from_secs(config.time_window_seconds.max(1) as u64);
+        self.threshold_ports = threshold_count(config);
+        self.window_duration = Duration::from_secs(window_secs(config));
     }
 
     fn evaluate(&mut self, event: &TrafficEvent) -> Option<Alert> {
@@ -64,6 +64,12 @@ impl DetectionRule for PortScanDetector {
         // For TCP, only consider connection initiations (SYN without ACK), avoiding server responses on ephemeral ports (Mục 25)
         if event.protocol == "TCP" && (!event.flags.contains("SYN") || event.flags.contains("ACK"))
         {
+            return None;
+        }
+
+        // UDP replies from well-known services (DNS, NTP…) to a client's ephemeral ports are not a
+        // scan by the server.
+        if event.protocol == "UDP" && event.src_port > 0 && event.src_port < 1024 && event.dst_port >= 1024 {
             return None;
         }
 

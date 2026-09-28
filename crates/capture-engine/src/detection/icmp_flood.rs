@@ -7,7 +7,7 @@ use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
-use super::DetectionRule;
+use super::{threshold_count, window_secs, DetectionRule};
 
 /// Detector for ICMP Flood / Ping Flood / Smurf attacks
 pub struct IcmpFloodDetector {
@@ -53,8 +53,8 @@ impl DetectionRule for IcmpFloodDetector {
     fn update_config(&mut self, config: &RuleModel) {
         self.rule_id = Some(config.id);
         self.is_enabled = config.is_enabled;
-        self.threshold_packets = config.threshold_value as usize;
-        self.window_duration = Duration::from_secs(config.time_window_seconds as u64);
+        self.threshold_packets = threshold_count(config);
+        self.window_duration = Duration::from_secs(window_secs(config));
     }
 
     fn evaluate(&mut self, event: &TrafficEvent) -> Option<Alert> {

@@ -58,8 +58,13 @@ async fn flush_traffic_batch(events: &[TrafficEvent], pool: Option<&Arc<PgPool>>
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt::init();
     dotenvy::dotenv().ok();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
 
     info!("🛡️ ========================================================");
     info!("🛡️ Starting Real-time Network Security Detection Engine");
