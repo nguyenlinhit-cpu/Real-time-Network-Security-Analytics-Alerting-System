@@ -179,6 +179,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    // Periodic memory cleanup for stale detection state (Mục 30)
+    let engine_cleanup = engine.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(60));
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            let mut eng = engine_cleanup.lock().await;
+            eng.cleanup_stale_state(Duration::from_secs(300));
+            tracing::debug!("Cleaned up stale detection engine tracking state");
+        }
+    });
+
     if simulation_mode {
         info!(
             "Running in SIMULATION MODE on interface '{}'",

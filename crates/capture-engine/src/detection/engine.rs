@@ -107,6 +107,13 @@ impl DetectionEngine {
         Ok(())
     }
 
+    /// Periodically cleans up stale internal state across all rules (Mục 30)
+    pub fn cleanup_stale_state(&mut self, max_age: std::time::Duration) {
+        for rule in &mut self.rules {
+            rule.cleanup_stale(max_age);
+        }
+    }
+
     /// Process a single event through all detection rules
     pub async fn process_event(&mut self, event: &TrafficEvent) {
         for rule in &mut self.rules {

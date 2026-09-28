@@ -14,9 +14,16 @@ pub async fn rate_limit_middleware(
 ) -> Result<Response, AppError> {
     let client_ip = request
         .headers()
-        .get("x-forwarded-for")
+        .get("x-real-ip")
         .and_then(|v| v.to_str().ok())
-        .map(|s| s.split(',').next().unwrap_or("unknown").trim())
+        .or_else(|| {
+            request
+                .headers()
+                .get("x-forwarded-for")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.rsplit(',').next()) // right-most hop before proxy
+        })
+        .map(|s| s.trim())
         .unwrap_or("127.0.0.1")
         .to_string();
 

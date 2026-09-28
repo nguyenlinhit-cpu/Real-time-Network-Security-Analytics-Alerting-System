@@ -116,4 +116,19 @@ impl DetectionRule for IcmpFloodDetector {
 
         None
     }
+
+    fn cleanup_stale(&mut self, max_age: Duration) {
+        let now = Instant::now();
+        self.history.retain(|_, timestamps| {
+            while let Some(&oldest) = timestamps.front() {
+                if now.duration_since(oldest) > max_age {
+                    timestamps.pop_front();
+                } else {
+                    break;
+                }
+            }
+            !timestamps.is_empty()
+        });
+        self.last_alert_time.retain(|_, t| now.duration_since(*t) < max_age);
+    }
 }

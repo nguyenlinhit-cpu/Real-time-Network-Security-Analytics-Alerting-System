@@ -30,22 +30,6 @@ impl SynFloodDetector {
             last_alert_time: HashMap::new(),
         }
     }
-
-    /// Periodic memory cleanup for stale target IP histories (Mục 30)
-    pub fn cleanup_stale(&mut self, max_age: Duration) {
-        let now = Instant::now();
-        self.syn_history.retain(|_, history| {
-            while let Some(front) = history.front() {
-                if now.duration_since(*front) > max_age {
-                    history.pop_front();
-                } else {
-                    break;
-                }
-            }
-            !history.is_empty()
-        });
-        self.last_alert_time.retain(|_, t| now.duration_since(*t) < max_age);
-    }
 }
 
 impl DetectionRule for SynFloodDetector {
@@ -130,5 +114,20 @@ impl DetectionRule for SynFloodDetector {
         } else {
             None
         }
+    }
+
+    fn cleanup_stale(&mut self, max_age: Duration) {
+        let now = Instant::now();
+        self.syn_history.retain(|_, history| {
+            while let Some(front) = history.front() {
+                if now.duration_since(*front) > max_age {
+                    history.pop_front();
+                } else {
+                    break;
+                }
+            }
+            !history.is_empty()
+        });
+        self.last_alert_time.retain(|_, t| now.duration_since(*t) < max_age);
     }
 }

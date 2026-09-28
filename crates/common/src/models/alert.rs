@@ -52,6 +52,8 @@ pub struct Alert {
     pub status: AlertStatus,
     pub acknowledged_by: Option<Uuid>,
     pub resolved_at: Option<DateTime<Utc>>,
+    pub mitre_tactic: Option<String>,
+    pub mitre_technique: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
@@ -64,10 +66,24 @@ pub struct CreateAlertDto {
     pub description: String,
     pub src_ip: String,
     pub dst_ip: String,
+    pub mitre_tactic: Option<String>,
+    pub mitre_technique: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct UpdateAlertDto {
     pub status: AlertStatus,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub struct AlertQueryFilter {
+    pub severity: Option<AlertSeverity>,
+    pub status: Option<AlertStatus>,
+    pub src_ip: Option<String>,
+    pub dst_ip: Option<String>,
+    pub search: Option<String>,
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
 }
