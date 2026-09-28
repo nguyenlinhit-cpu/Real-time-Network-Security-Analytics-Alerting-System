@@ -95,8 +95,14 @@ impl DetectionRule for BruteForceDetector {
         let key = (event.src_ip, event.dst_ip, event.dst_port);
 
         let history = self.attempt_history.entry(key).or_default();
-        history.retain(|t| now.duration_since(*t) <= self.window_duration);
-        history.push(now);
+        while let Some(front) = history.front() {
+            if now.duration_since(*front) > self.window_duration {
+                history.pop_front();
+            } else {
+                break;
+            }
+        }
+        history.push_back(now);
 
         if history.len() >= self.threshold_attempts {
             if let Some(last_alert) = self.last_alert_time.get(&key) {

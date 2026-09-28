@@ -25,4 +25,7 @@ pub trait DetectionRule: Send + Sync {
 
     /// Restores internal state from a persisted snapshot
     fn import_state(&mut self, _state: &serde_json::Value) {}
+
+    /// Cleanup stale internal tracking state older than max_age
+    fn cleanup_stale(&mut self, _max_age: std::time::Duration) {}
 }
