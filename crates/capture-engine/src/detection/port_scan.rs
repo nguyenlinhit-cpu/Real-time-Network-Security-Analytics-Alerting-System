@@ -110,6 +110,8 @@ impl DetectionRule for PortScanDetector {
                 status: AlertStatus::Open,
                 acknowledged_by: None,
                 resolved_at: None,
+                mitre_tactic: Some("Discovery".to_string()),
+                mitre_technique: Some("T1046".to_string()),
             })
         } else {
             None

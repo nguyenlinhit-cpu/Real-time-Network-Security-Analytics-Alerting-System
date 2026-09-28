@@ -98,6 +98,8 @@ impl DetectionRule for ArpSpoofDetector {
                     status: AlertStatus::Open,
                     acknowledged_by: None,
                     resolved_at: None,
+                    mitre_tactic: Some("Credential Access".to_string()),
+                    mitre_technique: Some("T1557".to_string()),
                 });
             }
         } else {

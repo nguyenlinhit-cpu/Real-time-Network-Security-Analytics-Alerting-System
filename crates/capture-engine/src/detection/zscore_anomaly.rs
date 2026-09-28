@@ -149,6 +149,8 @@ impl DetectionRule for ZScoreAnomalyDetector {
                     status: AlertStatus::Open,
                     acknowledged_by: None,
                     resolved_at: None,
+                    mitre_tactic: Some("Exfiltration".to_string()),
+                    mitre_technique: Some("T1020".to_string()),
                 });
             }
         }

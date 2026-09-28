@@ -125,6 +125,8 @@ impl DetectionRule for DnsTunnelDetector {
                     status: AlertStatus::Open,
                     acknowledged_by: None,
                     resolved_at: None,
+                    mitre_tactic: Some("Exfiltration".to_string()),
+                    mitre_technique: Some("T1071.004".to_string()),
                 });
             }
         }

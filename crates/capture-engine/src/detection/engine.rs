@@ -85,7 +85,7 @@ impl DetectionEngine {
     /// Update detection rules dynamically from database configuration
     pub async fn reload_rules_from_db(&mut self, pool: &PgPool) -> Result<(), sqlx::Error> {
         let db_rules = sqlx::query_as::<_, RuleModel>(
-            "SELECT id, name, rule_type, condition_json, severity, is_enabled, threshold_value, time_window_seconds, created_at, updated_at FROM detection_rules"
+            "SELECT id, name, rule_type, condition_json, severity, is_enabled, threshold_value, time_window_seconds, created_at, updated_at, mitre_tactic, mitre_technique FROM detection_rules"
         )
         .fetch_all(pool)
         .await?;
@@ -278,8 +278,8 @@ pub fn spawn_alert_persister(mut alert_rx: Receiver<Alert>, pool: Option<Arc<PgP
             if let Some(ref pool) = pool {
                 let result = sqlx::query(
                     r#"
-                    INSERT INTO alerts (id, rule_id, severity, title, description, src_ip, dst_ip, detected_at, status)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                    INSERT INTO alerts (id, rule_id, severity, title, description, src_ip, dst_ip, detected_at, status, mitre_tactic, mitre_technique)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                     "#,
                 )
                 .bind(alert.id)
@@ -291,6 +291,8 @@ pub fn spawn_alert_persister(mut alert_rx: Receiver<Alert>, pool: Option<Arc<PgP
                 .bind(alert.dst_ip)
                 .bind(alert.detected_at)
                 .bind(alert.status)
+                .bind(&alert.mitre_tactic)
+                .bind(&alert.mitre_technique)
                 .execute(pool.as_ref())
                 .await;
 

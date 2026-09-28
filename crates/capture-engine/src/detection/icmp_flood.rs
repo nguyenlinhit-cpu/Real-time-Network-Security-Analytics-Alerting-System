@@ -111,6 +111,8 @@ impl DetectionRule for IcmpFloodDetector {
                 status: AlertStatus::Open,
                 acknowledged_by: None,
                 resolved_at: None,
+                mitre_tactic: Some("Impact".to_string()),
+                mitre_technique: Some("T1498.001".to_string()),
             });
         }
 
