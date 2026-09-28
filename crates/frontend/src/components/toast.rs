@@ -4,24 +4,23 @@ use leptos::prelude::*;
 use crate::components::icons::{IconAlert, IconBell, IconClose};
 
 fn play_critical_sound() {
-    let _ = js_sys::eval(
-        r#"
-        try {
-            const ctx = new (window.AudioContext || window.webkitAudioContext)();
-            const osc = ctx.createOscillator();
-            const gain = ctx.createGain();
-            osc.type = 'sawtooth';
-            osc.frequency.setValueAtTime(880, ctx.currentTime);
-            osc.frequency.exponentialRampToValueAtTime(440, ctx.currentTime + 0.35);
-            gain.gain.setValueAtTime(0.25, ctx.currentTime);
-            gain.gain.linearRampToValueAtTime(0.01, ctx.currentTime + 0.35);
-            osc.connect(gain);
-            gain.connect(ctx.destination);
-            osc.start();
-            osc.stop(ctx.currentTime + 0.35);
-        } catch(e) {}
-    "#,
-    );
+    // Safe Web Audio API invocation without js_sys::eval (Mục 53)
+    if let Ok(ctx) = web_sys::AudioContext::new() {
+        if let (Ok(osc), Ok(gain)) = (ctx.create_oscillator(), ctx.create_gain()) {
+            osc.set_type(web_sys::OscillatorType::Sawtooth);
+            let now = ctx.current_time();
+            let _ = osc.frequency().set_value_at_time(880.0, now);
+            let _ = osc
+                .frequency()
+                .exponential_ramp_to_value_at_time(440.0, now + 0.35);
+            let _ = gain.gain().set_value_at_time(0.25, now);
+            let _ = gain.gain().linear_ramp_to_value_at_time(0.01, now + 0.35);
+            let _ = osc.connect_with_audio_node(&gain);
+            let _ = gain.connect_with_audio_node(&ctx.destination());
+            let _ = osc.start();
+            let _ = osc.stop_with_when(now + 0.35);
+        }
+    }
 }
 
 #[component]

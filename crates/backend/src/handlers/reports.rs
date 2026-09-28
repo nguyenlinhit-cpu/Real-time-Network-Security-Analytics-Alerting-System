@@ -41,7 +41,8 @@ pub async fn export_reports(
         r#"
         SELECT 
             id, rule_id, severity, title, description, src_ip, dst_ip,
-            detected_at, status, acknowledged_by, resolved_at
+            detected_at, status, acknowledged_by, resolved_at,
+            mitre_tactic, mitre_technique
         FROM alerts
         WHERE ($1::TIMESTAMPTZ IS NULL OR detected_at >= $1)
           AND ($2::TIMESTAMPTZ IS NULL OR detected_at <= $2)
@@ -55,10 +56,10 @@ pub async fn export_reports(
     .await?;
 
     let mut csv_output =
-        String::from("id,detected_at,severity,status,src_ip,dst_ip,title,description\n");
+        String::from("id,detected_at,severity,status,src_ip,dst_ip,title,description,mitre_tactic,mitre_technique\n");
     for a in alerts {
         csv_output.push_str(&format!(
-            "\"{}\",\"{}\",\"{:?}\",\"{:?}\",\"{}\",\"{}\",\"{}\",\"{}\"\n",
+            "\"{}\",\"{}\",\"{:?}\",\"{:?}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\"\n",
             a.id,
             a.detected_at.to_rfc3339(),
             a.severity,
@@ -66,7 +67,9 @@ pub async fn export_reports(
             a.src_ip,
             a.dst_ip,
             sanitize_csv_cell(&a.title),
-            sanitize_csv_cell(&a.description)
+            sanitize_csv_cell(&a.description),
+            sanitize_csv_cell(a.mitre_tactic.as_deref().unwrap_or("")),
+            sanitize_csv_cell(a.mitre_technique.as_deref().unwrap_or(""))
         ));
     }
 

@@ -26,7 +26,11 @@ pub fn Navbar(
     let (is_dark, set_is_dark) = signal(true);
     let on_toggle_theme = move |_| {
         set_is_dark.update(|d| *d = !*d);
-        let _ = js_sys::eval("document.documentElement.classList.toggle('dark')");
+        if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
+            if let Some(el) = doc.document_element() {
+                let _ = el.class_list().toggle("dark");
+            }
+        }
     };
 
     view! {

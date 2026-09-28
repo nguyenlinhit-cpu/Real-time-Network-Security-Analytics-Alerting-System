@@ -84,7 +84,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let payload = notification.payload();
             if let Ok(alert_id) = payload.parse::<uuid::Uuid>() {
                 let alert_res = sqlx::query_as::<_, Alert>(
-                    "SELECT id, rule_id, severity, title, description, src_ip, dst_ip, detected_at, status, acknowledged_by, resolved_at FROM alerts WHERE id = $1"
+                    "SELECT id, rule_id, severity, title, description, src_ip, dst_ip, detected_at, status, acknowledged_by, resolved_at, mitre_tactic, mitre_technique FROM alerts WHERE id = $1"
                 )
                 .bind(alert_id)
                 .fetch_optional(&alert_pool)

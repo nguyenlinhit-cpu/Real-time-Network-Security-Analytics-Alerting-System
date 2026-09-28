@@ -189,7 +189,7 @@ async fn test_detection_precision_and_recall_metrics() {
     }
 
     let mut false_positives = 0;
-    while let Ok(_) = alert_rx.try_recv() {
+    while alert_rx.try_recv().is_ok() {
         false_positives += 1;
     }
 
