@@ -31,6 +31,14 @@ pub async fn get_traffic(
 ) -> Result<Json<ApiResponse<Vec<TrafficEvent>>>, AppError> {
     let limit = filter.limit.unwrap_or(50).clamp(1, 500);
     let offset = filter.offset.unwrap_or(0).max(0);
+    let src_ip_parsed = filter
+        .src_ip
+        .as_deref()
+        .and_then(|s| s.parse::<ipnetwork::IpNetwork>().ok());
+    let dst_ip_parsed = filter
+        .dst_ip
+        .as_deref()
+        .and_then(|s| s.parse::<ipnetwork::IpNetwork>().ok());
 
     let events = sqlx::query_as::<_, TrafficEvent>(
         r#"
@@ -40,8 +48,8 @@ pub async fn get_traffic(
         FROM traffic_events
         WHERE ($1::TIMESTAMPTZ IS NULL OR time >= $1)
           AND ($2::TIMESTAMPTZ IS NULL OR time <= $2)
-          AND ($3::TEXT IS NULL OR host(src_ip) = $3)
-          AND ($4::TEXT IS NULL OR host(dst_ip) = $4)
+          AND ($3::INET IS NULL OR src_ip = $3)
+          AND ($4::INET IS NULL OR dst_ip = $4)
           AND ($5::TEXT IS NULL OR protocol = $5)
         ORDER BY time DESC
         LIMIT $6 OFFSET $7
@@ -49,8 +57,8 @@ pub async fn get_traffic(
     )
     .bind(filter.from)
     .bind(filter.to)
-    .bind(filter.src_ip)
-    .bind(filter.dst_ip)
+    .bind(src_ip_parsed)
+    .bind(dst_ip_parsed)
     .bind(filter.protocol)
     .bind(limit)
     .bind(offset)

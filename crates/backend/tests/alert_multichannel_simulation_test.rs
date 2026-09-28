@@ -21,6 +21,8 @@ fn make_test_alert(severity: AlertSeverity, src_ip: &str) -> Alert {
         status: AlertStatus::Open,
         acknowledged_by: None,
         resolved_at: None,
+        mitre_tactic: Some("Exfiltration".to_string()),
+        mitre_technique: Some("T1071.004".to_string()),
     }
 }
 

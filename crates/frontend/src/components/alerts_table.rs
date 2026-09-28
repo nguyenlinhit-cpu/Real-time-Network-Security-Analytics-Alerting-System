@@ -1,9 +1,9 @@
-use common::models::{Alert, AlertSeverity, AlertStatus};
+use common::models::{Alert, AlertSeverity, AlertStatus, TrafficEvent, UserRole};
 use leptos::prelude::*;
 use uuid::Uuid;
 
 use crate::api::client::ApiClient;
-use crate::components::icons::IconSearch;
+use crate::components::icons::{IconClose, IconSearch};
 
 #[component]
 pub fn AlertsTable(
@@ -13,6 +13,27 @@ pub fn AlertsTable(
     let (filter_severity, set_filter_severity) = signal::<Option<AlertSeverity>>(None);
     let (filter_status, set_filter_status) = signal::<Option<AlertStatus>>(None);
     let (search_query, set_search_query) = signal(String::new());
+
+    let (selected_alert, set_selected_alert) = signal::<Option<Alert>>(None);
+    let (related_traffic, set_related_traffic) = signal::<Vec<TrafficEvent>>(Vec::new());
+    let (is_loading_traffic, set_is_loading_traffic) = signal(false);
+
+    let current_user = ApiClient::get_current_user();
+    let is_viewer = current_user
+        .map(|u| u.role == UserRole::Viewer)
+        .unwrap_or(true);
+
+    let load_related_traffic = move |alert_id: Uuid| {
+        set_is_loading_traffic.set(true);
+        leptos::task::spawn_local(async move {
+            if let Ok(traffic) = ApiClient::get_alert_traffic(alert_id).await {
+                set_related_traffic.set(traffic);
+            } else {
+                set_related_traffic.set(Vec::new());
+            }
+            set_is_loading_traffic.set(false);
+        });
+    };
 
     let filtered_alerts = Memo::new(move |_| {
         let query = search_query.get().to_lowercase();
@@ -128,7 +149,7 @@ pub fn AlertsTable(
                     <thead class="text-ink-500 border-b border-ink-600 uppercase tracking-wider font-semibold text-[10px]">
                         <tr>
                             <th class="pb-3 px-3 font-mono">"Severity"</th>
-                            <th class="pb-3 px-3 font-mono">"Title & description"</th>
+                            <th class="pb-3 px-3 font-mono">"Title & MITRE ATT&CK"</th>
                             <th class="pb-3 px-3 font-mono">"Source"</th>
                             <th class="pb-3 px-3 font-mono">"Target"</th>
                             <th class="pb-3 px-3 font-mono">"Status"</th>
@@ -141,6 +162,7 @@ pub fn AlertsTable(
                             key=|alert| alert.id
                             children=move |alert| {
                                 let alert_id = alert.id;
+                                let alert_clone = alert.clone();
                                 let sev_class = match alert.severity {
                                     AlertSeverity::Critical => "bg-sev-critical/10 text-sev-critical border-sev-critical/30",
                                     AlertSeverity::High => "bg-sev-high/10 text-sev-high border-sev-high/30",
@@ -163,10 +185,19 @@ pub fn AlertsTable(
                                             </span>
                                         </td>
 
-                                        // Title & Description
+                                        // Title & Description & MITRE ATT&CK
                                         <td class="py-3.5 px-3 max-w-sm">
-                                            <div class="font-semibold text-slate-100 group-hover:text-brand transition-colors">
-                                                {alert.title}
+                                            <div class="font-semibold text-slate-100 group-hover:text-brand transition-colors flex items-center gap-1.5 flex-wrap">
+                                                <span>{alert.title.clone()}</span>
+                                                {if let Some(ref tech) = alert.mitre_technique {
+                                                    view! {
+                                                        <span class="inline-flex items-center px-1.5 py-0.2 rounded text-[9px] font-mono bg-purple-500/10 text-purple-400 border border-purple-500/30">
+                                                            {tech.clone()}
+                                                        </span>
+                                                    }.into_any()
+                                                } else {
+                                                    view! { <span></span> }.into_any()
+                                                }}
                                             </div>
                                             <div class="text-ink-500 text-[11px] truncate mt-0.5">
                                                 {alert.description}
@@ -193,28 +224,42 @@ pub fn AlertsTable(
                                         // Actions
                                         <td class="py-3.5 px-3 text-right whitespace-nowrap">
                                             <div class="inline-flex items-center gap-1.5">
-                                                {if alert.status == AlertStatus::Open {
-                                                    view! {
-                                                        <button
-                                                            class="px-2.5 py-1 rounded bg-sev-high/10 hover:bg-sev-high/20 text-sev-high border border-sev-high/30 text-[11px] font-medium transition-colors"
-                                                            on:click=move |_| on_update_status(alert_id, AlertStatus::Acknowledged)
-                                                        >
-                                                            "Acknowledge"
-                                                        </button>
-                                                    }.into_any()
-                                                } else if alert.status == AlertStatus::Acknowledged {
-                                                    view! {
-                                                        <button
-                                                            class="px-2.5 py-1 rounded bg-brand/10 hover:bg-brand/20 text-brand border border-brand/30 text-[11px] font-medium transition-colors"
-                                                            on:click=move |_| on_update_status(alert_id, AlertStatus::Resolved)
-                                                        >
-                                                            "Resolve"
-                                                        </button>
-                                                    }.into_any()
+                                                <button
+                                                    class="px-2 py-1 rounded bg-ink-800 hover:bg-ink-700 text-slate-300 border border-ink-600 text-[11px] font-medium transition-colors"
+                                                    on:click=move |_| {
+                                                        set_selected_alert.set(Some(alert_clone.clone()));
+                                                        load_related_traffic(alert_id);
+                                                    }
+                                                >
+                                                    "Inspect"
+                                                </button>
+
+                                                {if !is_viewer {
+                                                    if alert.status == AlertStatus::Open {
+                                                        view! {
+                                                            <button
+                                                                class="px-2.5 py-1 rounded bg-sev-high/10 hover:bg-sev-high/20 text-sev-high border border-sev-high/30 text-[11px] font-medium transition-colors"
+                                                                on:click=move |_| on_update_status(alert_id, AlertStatus::Acknowledged)
+                                                            >
+                                                                "Acknowledge"
+                                                            </button>
+                                                        }.into_any()
+                                                    } else if alert.status == AlertStatus::Acknowledged {
+                                                        view! {
+                                                            <button
+                                                                class="px-2.5 py-1 rounded bg-brand/10 hover:bg-brand/20 text-brand border border-brand/30 text-[11px] font-medium transition-colors"
+                                                                on:click=move |_| on_update_status(alert_id, AlertStatus::Resolved)
+                                                            >
+                                                                "Resolve"
+                                                            </button>
+                                                        }.into_any()
+                                                    } else {
+                                                        view! {
+                                                            <span class="text-ink-600 text-[11px] italic">"Closed"</span>
+                                                        }.into_any()
+                                                    }
                                                 } else {
-                                                    view! {
-                                                        <span class="text-ink-600 text-[11px] italic">"Closed"</span>
-                                                    }.into_any()
+                                                    view! { <span></span> }.into_any()
                                                 }}
                                             </div>
                                         </td>
@@ -225,6 +270,120 @@ pub fn AlertsTable(
                     </tbody>
                 </table>
             </div>
+
+            // Inspection Drawer / Modal (Mục 20: Trang chi tiết alert kèm traffic liên quan)
+            {move || {
+                if let Some(alert) = selected_alert.get() {
+                    let sev_style = match alert.severity {
+                        AlertSeverity::Critical => "bg-sev-critical/10 text-sev-critical border-sev-critical/30",
+                        AlertSeverity::High => "bg-sev-high/10 text-sev-high border-sev-high/30",
+                        AlertSeverity::Medium => "bg-sev-medium/10 text-sev-medium border-sev-medium/30",
+                        AlertSeverity::Low => "bg-sev-low/10 text-sev-low border-sev-low/30",
+                    };
+
+                    view! {
+                        <div class="fixed inset-0 bg-ink-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+                            <div class="bg-ink-900 border border-ink-600 rounded-xl max-w-3xl w-full max-h-[85vh] flex flex-col shadow-2xl overflow-hidden">
+                                // Modal Header
+                                <div class="p-5 border-b border-ink-700 flex items-start justify-between">
+                                    <div>
+                                        <div class="flex items-center gap-2">
+                                            <span class=format!("px-2 py-0.5 rounded text-[10px] font-mono font-bold border {}", sev_style)>
+                                                {format!("{:?}", alert.severity).to_uppercase()}
+                                            </span>
+                                            <h3 class="text-lg font-bold text-white tracking-tight">{alert.title}</h3>
+                                        </div>
+                                        <p class="text-xs text-ink-400 mt-1">{alert.description}</p>
+                                    </div>
+                                    <button
+                                        on:click=move |_| set_selected_alert.set(None)
+                                        class="p-1.5 rounded-lg text-ink-400 hover:text-white hover:bg-ink-800 transition-colors"
+                                    >
+                                        <IconClose class="w-5 h-5".to_string() />
+                                    </button>
+                                </div>
+
+                                // Modal Metadata
+                                <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 p-4 bg-ink-950/50 border-b border-ink-700 text-xs">
+                                    <div>
+                                        <div class="text-[10px] font-mono uppercase text-ink-500">"Source IP"</div>
+                                        <div class="font-mono text-slate-200 mt-0.5">{format!("{}", alert.src_ip)}</div>
+                                    </div>
+                                    <div>
+                                        <div class="text-[10px] font-mono uppercase text-ink-500">"Target IP"</div>
+                                        <div class="font-mono text-slate-200 mt-0.5">{format!("{}", alert.dst_ip)}</div>
+                                    </div>
+                                    <div>
+                                        <div class="text-[10px] font-mono uppercase text-ink-500">"MITRE Tactic"</div>
+                                        <div class="font-mono text-purple-400 mt-0.5">{alert.mitre_tactic.unwrap_or_else(|| "N/A".to_string())}</div>
+                                    </div>
+                                    <div>
+                                        <div class="text-[10px] font-mono uppercase text-ink-500">"MITRE Technique"</div>
+                                        <div class="font-mono text-purple-400 mt-0.5">{alert.mitre_technique.unwrap_or_else(|| "N/A".to_string())}</div>
+                                    </div>
+                                </div>
+
+                                // Related Traffic Packets
+                                <div class="p-5 flex-1 overflow-y-auto">
+                                    <div class="flex items-center justify-between mb-3">
+                                        <h4 class="text-xs font-mono font-bold uppercase tracking-wider text-slate-300">
+                                            "Correlated Traffic Events (±5 min window)"
+                                        </h4>
+                                        <span class="text-[11px] text-ink-500 font-mono">
+                                            {move || format!("{} packets captured", related_traffic.get().len())}
+                                        </span>
+                                    </div>
+
+                                    {move || {
+                                        if is_loading_traffic.get() {
+                                            view! { <div class="text-center py-8 text-xs text-ink-500">"Fetching correlated traffic events..."</div> }.into_any()
+                                        } else if related_traffic.get().is_empty() {
+                                            view! { <div class="text-center py-8 text-xs text-ink-500">"No correlated traffic packets found in hypertable window."</div> }.into_any()
+                                        } else {
+                                            view! {
+                                                <div class="border border-ink-700 rounded-lg overflow-hidden">
+                                                    <table class="w-full text-left text-[11px] font-mono">
+                                                        <thead class="bg-ink-950 text-ink-500 border-b border-ink-700 text-[10px]">
+                                                            <tr>
+                                                                <th class="py-2 px-3">"Time"</th>
+                                                                <th class="py-2 px-3">"Src Port"</th>
+                                                                <th class="py-2 px-3">"Dst Port"</th>
+                                                                <th class="py-2 px-3">"Proto"</th>
+                                                                <th class="py-2 px-3">"Bytes"</th>
+                                                                <th class="py-2 px-3">"Flags / Metadata"</th>
+                                                            </tr>
+                                                        </thead>
+                                                        <tbody class="divide-y divide-ink-800 text-slate-300">
+                                                            <For
+                                                                each=move || related_traffic.get()
+                                                                key=|t| t.id
+                                                                children=|t| {
+                                                                    view! {
+                                                                        <tr class="hover:bg-ink-800/50">
+                                                                            <td class="py-2 px-3 whitespace-nowrap text-ink-400">{t.time.format("%H:%M:%S").to_string()}</td>
+                                                                            <td class="py-2 px-3">{t.src_port}</td>
+                                                                            <td class="py-2 px-3 text-brand">{t.dst_port}</td>
+                                                                            <td class="py-2 px-3 font-semibold">{t.protocol}</td>
+                                                                            <td class="py-2 px-3">{t.bytes_transferred}</td>
+                                                                            <td class="py-2 px-3 text-ink-400 truncate max-w-xs">{t.flags}</td>
+                                                                        </tr>
+                                                                    }
+                                                                }
+                                                            />
+                                                        </tbody>
+                                                    </table>
+                                                </div>
+                                            }.into_any()
+                                        }
+                                    }}
+                                </div>
+                            </div>
+                        </div>
+                    }.into_any()
+                } else {
+                    view! { <span></span> }.into_any()
+                }
+            }}
         </div>
     }
 }

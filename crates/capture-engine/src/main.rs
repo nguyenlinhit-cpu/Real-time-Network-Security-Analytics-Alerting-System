@@ -192,6 +192,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    // Periodic sensor heartbeat reporting (Mục 40 / C1.40)
+    let pool_heartbeat = pool.clone();
+    let interface_name_heartbeat = interface_name.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(15));
+        interval.tick().await;
+        let sensor_id = std::env::var("SENSOR_ID")
+            .or_else(|_| std::env::var("HOSTNAME"))
+            .unwrap_or_else(|_| "sensor-primary-node".to_string());
+        let version = env!("CARGO_PKG_VERSION").to_string();
+
+        loop {
+            interval.tick().await;
+            if let Some(ref p) = pool_heartbeat {
+                let _ = sqlx::query(
+                    r#"
+                    INSERT INTO sensor_heartbeats (sensor_id, sensor_version, interface_name, packets_captured, packets_dropped, status, last_heartbeat)
+                    VALUES ($1, $2, $3, 0, 0, 'healthy', CURRENT_TIMESTAMP)
+                    ON CONFLICT (sensor_id) DO UPDATE SET
+                        sensor_version = EXCLUDED.sensor_version,
+                        interface_name = EXCLUDED.interface_name,
+                        status = 'healthy',
+                        last_heartbeat = CURRENT_TIMESTAMP
+                    "#,
+                )
+                .bind(&sensor_id)
+                .bind(&version)
+                .bind(&interface_name_heartbeat)
+                .execute(p.as_ref())
+                .await;
+            }
+        }
+    });
+
     if simulation_mode {
         info!(
             "Running in SIMULATION MODE on interface '{}'",

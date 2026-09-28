@@ -4,6 +4,7 @@ pub mod blocked_ip;
 pub mod device;
 pub mod notification;
 pub mod rule;
+pub mod sensor;
 pub mod traffic;
 pub mod user;
 
@@ -13,5 +14,6 @@ pub use blocked_ip::*;
 pub use device::*;
 pub use notification::*;
 pub use rule::*;
+pub use sensor::*;
 pub use traffic::*;
 pub use user::*;

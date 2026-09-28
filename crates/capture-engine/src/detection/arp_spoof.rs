@@ -130,6 +130,7 @@ impl DetectionRule for ArpSpoofDetector {
 
     fn cleanup_stale(&mut self, max_age: std::time::Duration) {
         let now = Instant::now();
-        self.last_alert_time.retain(|_, t| now.duration_since(*t) < max_age);
+        self.last_alert_time
+            .retain(|_, t| now.duration_since(*t) < max_age);
     }
 }

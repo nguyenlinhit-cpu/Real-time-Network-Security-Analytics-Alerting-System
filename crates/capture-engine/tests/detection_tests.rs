@@ -488,6 +488,8 @@ fn test_rule_config_dynamic_update() {
         time_window_seconds: 120,
         created_at: Utc::now(),
         updated_at: Utc::now(),
+        mitre_tactic: Some("Discovery".to_string()),
+        mitre_technique: Some("T1046".to_string()),
     };
 
     detector.update_config(&updated_config);

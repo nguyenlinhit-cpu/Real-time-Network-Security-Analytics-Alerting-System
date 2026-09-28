@@ -1,6 +1,6 @@
 pub mod alerts;
-pub mod auth;
 pub mod audit_logs;
+pub mod auth;
 pub mod blocklist;
 pub mod dashboard;
 pub mod devices;

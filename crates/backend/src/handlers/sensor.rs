@@ -1,30 +1,8 @@
 use axum::{extract::State, Json};
+use common::models::{SensorHeartbeatDto, SensorStatusDto};
 use common::ApiResponse;
-use serde::{Deserialize, Serialize};
 
 use crate::{error::AppError, state::AppState};
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-pub struct SensorHeartbeatDto {
-    pub sensor_id: String,
-    pub sensor_version: String,
-    pub interface_name: String,
-    pub packets_captured: i64,
-    pub packets_dropped: i64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
-#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-pub struct SensorStatusDto {
-    pub sensor_id: String,
-    pub sensor_version: String,
-    pub interface_name: String,
-    pub packets_captured: i64,
-    pub packets_dropped: i64,
-    pub status: String,
-    pub last_heartbeat: chrono::DateTime<chrono::Utc>,
-}
 
 #[utoipa::path(
     post,

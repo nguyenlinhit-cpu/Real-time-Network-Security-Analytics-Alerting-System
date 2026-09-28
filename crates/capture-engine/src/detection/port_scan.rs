@@ -62,7 +62,8 @@ impl DetectionRule for PortScanDetector {
         }
 
         // For TCP, only consider connection initiations (SYN without ACK), avoiding server responses on ephemeral ports (Mục 25)
-        if event.protocol == "TCP" && (!event.flags.contains("SYN") || event.flags.contains("ACK")) {
+        if event.protocol == "TCP" && (!event.flags.contains("SYN") || event.flags.contains("ACK"))
+        {
             return None;
         }
 
@@ -130,6 +131,7 @@ impl DetectionRule for PortScanDetector {
             }
             !history.is_empty()
         });
-        self.last_alert_time.retain(|_, t| now.duration_since(*t) < max_age);
+        self.last_alert_time
+            .retain(|_, t| now.duration_since(*t) < max_age);
     }
 }

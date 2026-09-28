@@ -9,8 +9,13 @@ use crate::ws::client::{init_alerts_websocket, init_traffic_websocket};
 #[component]
 pub fn App() -> impl IntoView {
     let initial_user = ApiClient::get_current_user();
+    let hash_tab = web_sys::window()
+        .and_then(|w| w.location().hash().ok())
+        .map(|h| h.trim_start_matches('#').to_string())
+        .filter(|h| !h.is_empty());
+
     let initial_tab = if initial_user.is_some() {
-        "dashboard".to_string()
+        hash_tab.unwrap_or_else(|| "dashboard".to_string())
     } else {
         "login".to_string()
     };
@@ -22,6 +27,16 @@ pub fn App() -> impl IntoView {
     let (throughput, set_throughput) = signal(0u64);
     let (latest_alert, set_latest_alert) = signal::<Option<Alert>>(None);
     let (is_ws_connected, set_is_ws_connected) = signal(false);
+
+    // Sync active tab to URL hash (Mục 52)
+    Effect::new(move |_| {
+        let tab = active_tab.get();
+        if tab != "login" {
+            if let Some(w) = web_sys::window() {
+                let _ = w.location().set_hash(&tab);
+            }
+        }
+    });
 
     // Re-fetch data whenever user logs in or on start if already logged in
     Effect::new(move |_| {
@@ -86,6 +101,7 @@ pub fn App() -> impl IntoView {
                             "devices" => view! { <DevicesPage /> }.into_any(),
                             "blocklist" => view! { <BlocklistPage /> }.into_any(),
                             "settings" => view! { <SettingsPage /> }.into_any(),
+                            "audit_logs" => view! { <AuditLogsPage /> }.into_any(),
                             _ => view! { <DashboardPage alerts=alerts throughput=throughput set_active_tab=set_active_tab /> }.into_any(),
                         }
                     }}

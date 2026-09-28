@@ -224,6 +224,43 @@ impl ApiClient {
         })
     }
 
+    pub async fn get_alert_traffic(id: uuid::Uuid) -> Result<Vec<TrafficEvent>, String> {
+        let res = Self::auth_request("GET", &format!("/api/alerts/{}/traffic", id))
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        let body: ApiResponse<Vec<TrafficEvent>> = res.json().await.map_err(|e| e.to_string())?;
+        body.data.ok_or_else(|| {
+            body.error
+                .unwrap_or_else(|| "Failed to load alert traffic".to_string())
+        })
+    }
+
+    pub async fn get_audit_logs() -> Result<Vec<AuditLog>, String> {
+        let res = Self::auth_request("GET", "/api/audit-logs?limit=100")
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        let body: ApiResponse<Vec<AuditLog>> = res.json().await.map_err(|e| e.to_string())?;
+        body.data.ok_or_else(|| {
+            body.error
+                .unwrap_or_else(|| "Failed to load audit logs".to_string())
+        })
+    }
+
+    pub async fn get_sensor_status() -> Result<Vec<SensorStatusDto>, String> {
+        let res = Self::auth_request("GET", "/api/sensor/status")
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        let body: ApiResponse<Vec<SensorStatusDto>> =
+            res.json().await.map_err(|e| e.to_string())?;
+        body.data.ok_or_else(|| {
+            body.error
+                .unwrap_or_else(|| "Failed to load sensor status".to_string())
+        })
+    }
+
     pub async fn register(dto: &CreateUserDto) -> Result<AuthResponseDto, String> {
         let res = Request::post("/api/auth/register")
             .json(dto)

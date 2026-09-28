@@ -26,7 +26,11 @@ use crate::{
         traffic::get_traffic,
         alerts::get_alerts,
         alerts::get_alert_by_id,
+        alerts::get_alert_traffic,
         alerts::update_alert_status,
+        audit_logs::get_audit_logs,
+        sensor::record_heartbeat,
+        sensor::get_sensor_status,
         rules::get_rules,
         rules::get_rule_by_id,
         rules::create_rule,
@@ -102,10 +106,7 @@ pub fn create_router(state: AppState) -> Router {
             "/api/alerts/:id",
             get(alerts::get_alert_by_id).patch(alerts::update_alert_status),
         )
-        .route(
-            "/api/alerts/:id/traffic",
-            get(alerts::get_alert_traffic),
-        )
+        .route("/api/alerts/:id/traffic", get(alerts::get_alert_traffic))
         .route("/api/audit-logs", get(audit_logs::get_audit_logs))
         .route("/api/sensor/status", get(sensor::get_sensor_status))
         .route("/api/rules", get(rules::get_rules).post(rules::create_rule))
@@ -163,7 +164,8 @@ pub fn create_router(state: AppState) -> Router {
             get(|| async {
                 axum::Json(serde_json::json!({"status": "ok", "service": "secnet-backend"}))
             }),
-        );
+        )
+        .route("/api/sensor/heartbeat", post(sensor::record_heartbeat));
 
     // 5. Configurable CORS whitelist (Mục 13)
     let cors_env =

@@ -14,6 +14,7 @@ enum NavIcon {
     Devices,
     Blocklist,
     Settings,
+    AuditLogs,
 }
 
 fn render_icon(icon: NavIcon) -> impl IntoView {
@@ -26,6 +27,7 @@ fn render_icon(icon: NavIcon) -> impl IntoView {
         NavIcon::Devices => view! { <IconMonitor class=class /> }.into_any(),
         NavIcon::Blocklist => view! { <IconBan class=class /> }.into_any(),
         NavIcon::Settings => view! { <IconBell class=class /> }.into_any(),
+        NavIcon::AuditLogs => view! { <IconPulse class=class /> }.into_any(),
     }
 }
 
@@ -61,6 +63,7 @@ pub fn Sidebar(
 
                     if user_role == UserRole::Admin {
                         nav_items.push(("settings", NavIcon::Settings, "Alert channels"));
+                        nav_items.push(("audit_logs", NavIcon::AuditLogs, "Audit logs"));
                     }
 
                     nav_items.into_iter().map(|(id, icon, label)| {

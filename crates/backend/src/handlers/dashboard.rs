@@ -28,10 +28,12 @@ pub async fn get_dashboard_summary(
     .fetch_one(&state.pool)
     .await?;
 
-    // 2. Total active/unresolved alerts count
-    let alert_stats = sqlx::query!("SELECT COUNT(*)::BIGINT as total_alerts FROM alerts")
-        .fetch_one(&state.pool)
-        .await?;
+    // 2. Total active/unresolved alerts count (Mục 34)
+    let total_alerts: i64 =
+        sqlx::query_scalar("SELECT COUNT(*)::BIGINT FROM alerts WHERE status != 'resolved'")
+            .fetch_one(&state.pool)
+            .await
+            .unwrap_or(0);
 
     // 3. Top talkers (Source IPs by packet count)
     let top_ips = sqlx::query!(
@@ -86,7 +88,7 @@ pub async fn get_dashboard_summary(
     let summary = TrafficSummaryDto {
         total_packets: traffic_stats.total_packets.unwrap_or(0),
         total_bytes: traffic_stats.total_bytes.unwrap_or(0),
-        total_alerts: alert_stats.total_alerts.unwrap_or(0),
+        total_alerts,
         top_src_ips,
         top_dst_ports,
     };

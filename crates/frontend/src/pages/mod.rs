@@ -1,4 +1,5 @@
 pub mod alerts;
+pub mod audit_logs;
 pub mod blocklist;
 pub mod dashboard;
 pub mod devices;
@@ -8,6 +9,7 @@ pub mod settings;
 pub mod traffic;
 
 pub use alerts::AlertsPage;
+pub use audit_logs::AuditLogsPage;
 pub use blocklist::BlocklistPage;
 pub use dashboard::DashboardPage;
 pub use devices::DevicesPage;

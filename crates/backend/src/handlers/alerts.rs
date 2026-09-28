@@ -2,7 +2,7 @@ use axum::{
     extract::{Path, Query, State},
     Json,
 };
-use common::models::{Alert, AlertQueryFilter, AlertSeverity, AlertStatus, TrafficEvent, UpdateAlertDto};
+use common::models::{Alert, AlertQueryFilter, AlertStatus, TrafficEvent, UpdateAlertDto};
 use common::ApiResponse;
 use ipnetwork::IpNetwork;
 use uuid::Uuid;
@@ -37,8 +37,14 @@ pub async fn get_alerts(
 ) -> Result<Json<ApiResponse<Vec<Alert>>>, AppError> {
     let limit = filter.limit.unwrap_or(50).clamp(1, 200);
     let offset = filter.offset.unwrap_or(0).max(0);
-    let src_ip_parsed = filter.src_ip.as_deref().and_then(|s| s.parse::<IpNetwork>().ok());
-    let dst_ip_parsed = filter.dst_ip.as_deref().and_then(|s| s.parse::<IpNetwork>().ok());
+    let src_ip_parsed = filter
+        .src_ip
+        .as_deref()
+        .and_then(|s| s.parse::<IpNetwork>().ok());
+    let dst_ip_parsed = filter
+        .dst_ip
+        .as_deref()
+        .and_then(|s| s.parse::<IpNetwork>().ok());
     let search_like = filter.search.as_ref().map(|s| format!("%{}%", s));
 
     let alerts = sqlx::query_as::<_, Alert>(
@@ -193,7 +199,7 @@ pub async fn update_alert_status(
             mitre_tactic, mitre_technique
         FROM alerts
         WHERE id = $1
-        "#
+        "#,
     )
     .bind(id)
     .fetch_optional(&state.pool)

@@ -44,6 +44,8 @@ pub fn RulesPage() -> impl IntoView {
                 is_enabled: Some(new_state),
                 threshold_value: None,
                 time_window_seconds: None,
+                mitre_tactic: None,
+                mitre_technique: None,
             };
             if let Ok(updated) = ApiClient::update_rule(id, &dto).await {
                 set_rules.update(|list| {
@@ -90,6 +92,8 @@ pub fn RulesPage() -> impl IntoView {
                 is_enabled: Some(true),
                 threshold_value: thresh,
                 time_window_seconds: win,
+                mitre_tactic: None,
+                mitre_technique: None,
             };
 
             if let Ok(created) = ApiClient::create_rule(&dto).await {
@@ -278,6 +282,8 @@ pub fn RulesPage() -> impl IntoView {
                                     is_enabled: None,
                                     threshold_value: Some(new_t),
                                     time_window_seconds: None,
+                                    mitre_tactic: None,
+                                    mitre_technique: None,
                                 };
                                 if let Ok(updated) = ApiClient::update_rule(rule_id, &dto).await {
                                     set_rules.update(|list| {
