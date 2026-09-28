@@ -27,7 +27,10 @@ pub fn increment_http_requests() {
     ),
     tag = "System"
 )]
-pub async fn metrics_handler(State(state): State<AppState>, headers: axum::http::HeaderMap) -> Response {
+pub async fn metrics_handler(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> Response {
     // When METRICS_TOKEN is set, scrapers must send `Authorization: Bearer <token>`.
     if let Ok(expected) = std::env::var("METRICS_TOKEN") {
         let provided = headers

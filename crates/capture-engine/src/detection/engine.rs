@@ -19,8 +19,14 @@ use super::DetectionRule;
 
 /// Historical names used by older seeds for the built-in detectors.
 const RULE_ALIASES: [(&str, &str); 2] = [
-    ("Brute-force Attack Detection", "SSH/RDP Brute-Force Detection"),
-    ("ARP Spoofing / Poisoning Detection", "ARP Spoofing Detection"),
+    (
+        "Brute-force Attack Detection",
+        "SSH/RDP Brute-Force Detection",
+    ),
+    (
+        "ARP Spoofing / Poisoning Detection",
+        "ARP Spoofing Detection",
+    ),
 ];
 
 fn matches_builtin(builtin: &str, db_name: &str) -> bool {
@@ -309,7 +315,11 @@ pub fn spawn_auto_blocker(mut block_rx: Receiver<IpNetwork>, pool: Option<Arc<Pg
     });
 }
 
-async fn insert_alert(pool: &PgPool, alert: &Alert, rule_id: Option<uuid::Uuid>) -> Result<(), sqlx::Error> {
+async fn insert_alert(
+    pool: &PgPool,
+    alert: &Alert,
+    rule_id: Option<uuid::Uuid>,
+) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
         INSERT INTO alerts (id, rule_id, severity, title, description, src_ip, dst_ip, detected_at, status, mitre_tactic, mitre_technique)
@@ -343,7 +353,10 @@ pub fn spawn_alert_persister(mut alert_rx: Receiver<Alert>, pool: Option<Arc<PgP
             // The rule may have been deleted between detection and insert: keep the alert.
             if let Err(sqlx::Error::Database(ref db_err)) = result {
                 if db_err.is_foreign_key_violation() && alert.rule_id.is_some() {
-                    warn!("Rule of alert {} no longer exists; storing without rule link", alert.id);
+                    warn!(
+                        "Rule of alert {} no longer exists; storing without rule link",
+                        alert.id
+                    );
                     result = insert_alert(pool, &alert, None).await;
                 }
             }

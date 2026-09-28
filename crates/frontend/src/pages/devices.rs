@@ -33,7 +33,7 @@ pub fn DevicesPage() -> impl IntoView {
                 if q.is_empty() {
                     return true;
                 }
-                let ip = d.ip_address.to_string().to_lowercase();
+                let ip = d.ip_address.ip().to_string();
                 let mac = d.mac_address.clone().unwrap_or_default().to_lowercase();
                 let host = d.hostname.clone().unwrap_or_default().to_lowercase();
                 let dev_type = d.device_type.to_lowercase();
@@ -90,7 +90,7 @@ pub fn DevicesPage() -> impl IntoView {
                                         <h3 class="text-base font-bold text-white flex items-center gap-2">
                                             <IconHistory class="w-4 h-4 text-brand".to_string() />
                                             <span>"Traffic history for"</span>
-                                            <span class="font-mono text-brand">{format!("{}", dev.ip_address)}</span>
+                                            <span class="font-mono text-brand">{dev.ip_address.ip().to_string()}</span>
                                         </h3>
                                         <p class="text-xs text-ink-500 mt-0.5 font-mono">
                                             {format!("host: {} · mac: {}", dev.hostname.unwrap_or_else(|| "unknown".to_string()), dev.mac_address.unwrap_or_else(|| "-".to_string()))}
@@ -125,9 +125,9 @@ pub fn DevicesPage() -> impl IntoView {
                                                     <tbody class="divide-y divide-ink-700">
                                                         {device_history.get().into_iter().map(|ev| {
                                                             let peer = if ev.src_ip == dev.ip_address {
-                                                                format!("-> {}:{}", ev.dst_ip, ev.dst_port)
+                                                                format!("-> {}:{}", ev.dst_ip.ip(), ev.dst_port)
                                                             } else {
-                                                                format!("<- {}:{}", ev.src_ip, ev.src_port)
+                                                                format!("<- {}:{}", ev.src_ip.ip(), ev.src_port)
                                                             };
                                                             view! {
                                                                 <tr class="hover:bg-ink-800/40 transition-colors">
@@ -186,7 +186,7 @@ pub fn DevicesPage() -> impl IntoView {
                                 view! {
                                     <tr class="hover:bg-ink-800/40 transition-colors">
                                         <td class="py-3.5 px-3 font-mono font-bold text-white whitespace-nowrap">
-                                            {format!("{}", device.ip_address)}
+                                            {device.ip_address.ip().to_string()}
                                         </td>
                                         <td class="py-3.5 px-3 font-mono text-ink-500 whitespace-nowrap">
                                             {device.mac_address.clone().unwrap_or_else(|| "-".to_string())}

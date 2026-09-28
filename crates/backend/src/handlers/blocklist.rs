@@ -174,10 +174,10 @@ pub async fn remove_from_blocklist(
 
 /// Deletes blocklist entries whose block period has ended. Returns the number removed.
 pub async fn purge_expired_blocks(pool: &sqlx::PgPool) -> Result<u64, sqlx::Error> {
-    Ok(
-        sqlx::query("DELETE FROM blocked_ips WHERE blocked_until IS NOT NULL AND blocked_until <= NOW()")
-            .execute(pool)
-            .await?
-            .rows_affected(),
+    Ok(sqlx::query(
+        "DELETE FROM blocked_ips WHERE blocked_until IS NOT NULL AND blocked_until <= NOW()",
     )
+    .execute(pool)
+    .await?
+    .rows_affected())
 }

@@ -114,7 +114,8 @@ fn run_stream(
                 failed_attempts += 1;
                 backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
                 // Repeated handshake failures usually mean the access token expired.
-                if failed_attempts == 2 && ApiClient::get_token().as_deref() == Some(token.as_str()) {
+                if failed_attempts == 2 && ApiClient::get_token().as_deref() == Some(token.as_str())
+                {
                     ApiClient::refresh_session().await;
                 }
             }

@@ -2,7 +2,9 @@ use axum::{
     extract::{Path, Query, State},
     Json,
 };
-use common::models::{Alert, AlertQueryFilter, AlertStatus, TrafficEvent, UpdateAlertDto, UserRole};
+use common::models::{
+    Alert, AlertQueryFilter, AlertStatus, TrafficEvent, UpdateAlertDto, UserRole,
+};
 use common::ApiResponse;
 use uuid::Uuid;
 
@@ -19,11 +21,14 @@ const ALERT_COLUMNS: &str = "id, rule_id, severity, title, description, src_ip, 
      detected_at, status, acknowledged_by, resolved_at, mitre_tactic, mitre_technique";
 
 async fn fetch_alert(state: &AppState, id: Uuid) -> Result<Alert, AppError> {
-    sqlx::query_as::<_, Alert>(&format!("SELECT {} FROM alerts WHERE id = $1", ALERT_COLUMNS))
-        .bind(id)
-        .fetch_optional(&state.pool)
-        .await?
-        .ok_or_else(|| AppError::NotFound(format!("Alert with ID {} not found", id)))
+    sqlx::query_as::<_, Alert>(&format!(
+        "SELECT {} FROM alerts WHERE id = $1",
+        ALERT_COLUMNS
+    ))
+    .bind(id)
+    .fetch_optional(&state.pool)
+    .await?
+    .ok_or_else(|| AppError::NotFound(format!("Alert with ID {} not found", id)))
 }
 
 /// Allowed incident lifecycle transitions. `Resolved -> Open` is a deliberate re-open.

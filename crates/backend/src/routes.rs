@@ -179,7 +179,9 @@ pub fn create_router(state: AppState) -> Router {
     // explicit whitelist. Never fall back to `*`.
     let origins_str = std::env::var("CORS_ALLOWED_ORIGINS")
         .or_else(|_| std::env::var("CORS_ALLOWED_ORIGIN"))
-        .unwrap_or_else(|_| "http://localhost:3000,http://127.0.0.1:3000,https://localhost".to_string());
+        .unwrap_or_else(|_| {
+            "http://localhost:3000,http://127.0.0.1:3000,https://localhost".to_string()
+        });
     let origins: Vec<axum::http::HeaderValue> = origins_str
         .split(',')
         .map(str::trim)

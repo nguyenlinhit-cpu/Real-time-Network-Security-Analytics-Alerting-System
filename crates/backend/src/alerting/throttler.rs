@@ -39,7 +39,11 @@ impl AlertThrottler {
         let key = dedup_key(alert.rule_id, &alert.title, alert.src_ip);
         if let Some(ref r) = self.redis {
             match r
-                .set_nx_ex(&format!("secnet:throttle:{}", key), "1", self.window.as_secs())
+                .set_nx_ex(
+                    &format!("secnet:throttle:{}", key),
+                    "1",
+                    self.window.as_secs(),
+                )
                 .await
             {
                 // Key freshly created -> first occurrence -> do not throttle.

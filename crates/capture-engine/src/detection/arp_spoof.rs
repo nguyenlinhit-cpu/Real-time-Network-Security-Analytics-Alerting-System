@@ -45,7 +45,12 @@ impl ArpSpoofDetector {
     fn parse_mac(flags: &str) -> Option<String> {
         let idx = flags.find("MAC:")?;
         let slice = &flags[idx + 4..];
-        let mac = slice.split(',').next().unwrap_or(slice).trim().to_lowercase();
+        let mac = slice
+            .split(',')
+            .next()
+            .unwrap_or(slice)
+            .trim()
+            .to_lowercase();
         (!mac.is_empty()).then_some(mac)
     }
 }

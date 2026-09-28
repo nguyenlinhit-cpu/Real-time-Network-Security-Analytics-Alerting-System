@@ -1,4 +1,4 @@
-use common::models::{CreateUserDto, LoginDto, UserPublicDto, UserRole};
+use common::models::{CreateUserDto, LoginDto, UserPublicDto};
 use leptos::prelude::*;
 
 use crate::api::client::ApiClient;
@@ -13,7 +13,6 @@ pub fn LoginPage(
     let (username, set_username) = signal(String::new());
     let (email, set_email) = signal(String::new());
     let (password, set_password) = signal(String::new());
-    let (role, _set_role) = signal(UserRole::Viewer);
     let (error_msg, set_error_msg) = signal::<Option<String>>(None);
     let (is_loading, set_is_loading) = signal(false);
 
@@ -35,7 +34,6 @@ pub fn LoginPage(
         let u = username.get();
         let p = password.get();
         let em = email.get();
-        let r = role.get();
         let reg = is_register.get();
 
         leptos::task::spawn_local(async move {
@@ -44,7 +42,8 @@ pub fn LoginPage(
                     username: u,
                     email: em,
                     password: p,
-                    role: Some(r),
+                    // The server always assigns the Viewer role to self-registered accounts.
+                    role: None,
                 };
                 match ApiClient::register(&dto).await {
                     Ok(auth_data) => {

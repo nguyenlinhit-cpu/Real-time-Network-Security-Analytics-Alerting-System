@@ -45,7 +45,10 @@ where
             backoff = (backoff * 2).min(Duration::from_secs(30));
             continue;
         }
-        info!("📡 Real-time bridge connected via PostgreSQL LISTEN '{}'", channel);
+        info!(
+            "📡 Real-time bridge connected via PostgreSQL LISTEN '{}'",
+            channel
+        );
         backoff = Duration::from_secs(1);
 
         loop {
@@ -84,7 +87,10 @@ async fn check_default_credentials(pool: &PgPool, is_prod: bool) {
                 if is_prod {
                     error!("🚨 Seed account '{}' still uses its published default password. Change it immediately!", username);
                 } else {
-                    warn!("Seed account '{}' uses the default demo password.", username);
+                    warn!(
+                        "Seed account '{}' uses the default demo password.",
+                        username
+                    );
                 }
             }
         }
@@ -131,7 +137,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             || jwt_secret.len() < 32
         {
             error!("🚨 FATAL SECURITY ERROR: Server refused to start in production with missing, default, or weak JWT_SECRET! (must be >= 32 characters and not default/placeholder)");
-            return Err("Production requires a strong, unique JWT_SECRET with at least 32 characters".into());
+            return Err(
+                "Production requires a strong, unique JWT_SECRET with at least 32 characters"
+                    .into(),
+            );
         }
     } else if jwt_secret.starts_with("super_secret") || jwt_secret.contains("change_in_production")
     {
@@ -150,10 +159,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Migrations are the single source of schema truth; refusing to start on failure avoids
     // running against a half-migrated database (Mục 42).
     info!("📦 Checking and applying database migrations...");
-    sqlx::migrate!("../../migrations").run(&pool).await.map_err(|e| {
-        error!("Database migration failed: {}", e);
-        e
-    })?;
+    sqlx::migrate!("../../migrations")
+        .run(&pool)
+        .await
+        .map_err(|e| {
+            error!("Database migration failed: {}", e);
+            e
+        })?;
     info!("✅ Database migrations verified and up to date.");
 
     check_default_credentials(&pool, is_prod).await;
@@ -202,7 +214,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 match alert {
                     Ok(Some(alert)) => {
-                        info!("🔔 [REAL-TIME PIPELINE] Alert {} ({}) -> WS + notification channels", alert.id, alert.title);
+                        info!(
+                            "🔔 [REAL-TIME PIPELINE] Alert {} ({}) -> WS + notification channels",
+                            alert.id, alert.title
+                        );
                         let _ = alert_tx.send(alert.clone());
                         tokio::spawn(async move {
                             if let Err(e) = dispatcher.dispatch(&alert).await {
@@ -220,17 +235,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Real-time pipeline: batched live traffic statistics from the capture engine (Mục 2)
     {
         let traffic_tx = traffic_broadcast_tx.clone();
-        tokio::spawn(listen_forever(pool.clone(), "new_traffic", move |payload| {
-            let traffic_tx = traffic_tx.clone();
-            async move {
-                match serde_json::from_str::<TrafficBatchDto>(&payload) {
-                    Ok(batch) => {
-                        let _ = traffic_tx.send(batch);
+        tokio::spawn(listen_forever(
+            pool.clone(),
+            "new_traffic",
+            move |payload| {
+                let traffic_tx = traffic_tx.clone();
+                async move {
+                    match serde_json::from_str::<TrafficBatchDto>(&payload) {
+                        Ok(batch) => {
+                            let _ = traffic_tx.send(batch);
+                        }
+                        Err(e) => warn!("Ignoring malformed traffic notification: {}", e),
                     }
-                    Err(e) => warn!("Ignoring malformed traffic notification: {}", e),
                 }
-            }
-        }));
+            },
+        ));
     }
 
     let state = AppState {

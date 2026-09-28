@@ -23,9 +23,7 @@ const REFRESH_TOKEN_TTL_SECS: u64 = 7 * 24 * 3600;
 /// wrong passwords (username enumeration via timing). Generated once per process.
 fn dummy_password_hash() -> &'static str {
     static HASH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    HASH.get_or_init(|| {
-        hash_password(&uuid::Uuid::new_v4().to_string()).unwrap_or_default()
-    })
+    HASH.get_or_init(|| hash_password(&uuid::Uuid::new_v4().to_string()).unwrap_or_default())
 }
 
 /// Lockout counters are scoped to (account, client IP): an attacker cannot lock a legitimate
@@ -65,7 +63,10 @@ async fn record_failed_attempt(state: &AppState, key: &str) {
         }
     }
     let now = Instant::now();
-    let mut entry = state.failed_logins.entry(key.to_string()).or_insert((0, now));
+    let mut entry = state
+        .failed_logins
+        .entry(key.to_string())
+        .or_insert((0, now));
     let (count, last) = entry.value_mut();
     if now.duration_since(*last) > LOCKOUT_WINDOW {
         *count = 1;
@@ -221,7 +222,14 @@ pub async fn login(
     };
 
     clear_failed_attempts(&state, &key).await;
-    audit::record(&state.pool, Some(user.id), "LOGIN_SUCCESS", &user.username, ip).await;
+    audit::record(
+        &state.pool,
+        Some(user.id),
+        "LOGIN_SUCCESS",
+        &user.username,
+        ip,
+    )
+    .await;
 
     let (token, refresh_token) =
         generate_tokens(&user, &state.jwt_secret, state.jwt_expiration_hours)?;

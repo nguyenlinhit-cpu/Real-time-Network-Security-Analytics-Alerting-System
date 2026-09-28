@@ -12,6 +12,8 @@ RUN apt-get update && apt-get install -y \
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY .sqlx ./.sqlx
+# sqlx::migrate! embeds the SQL migrations at compile time
+COPY migrations ./migrations
 
 ENV SQLX_OFFLINE=true
 

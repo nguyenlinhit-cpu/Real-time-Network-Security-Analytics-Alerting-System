@@ -180,7 +180,8 @@ pub fn RulesPage() -> impl IntoView {
     };
 
     let input_class = "w-full bg-ink-950 border border-ink-600 rounded-md px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-brand/60 transition-colors";
-    let label_class = "block text-[11px] font-mono font-semibold text-ink-500 uppercase tracking-wide mb-1.5";
+    let label_class =
+        "block text-[11px] font-mono font-semibold text-ink-500 uppercase tracking-wide mb-1.5";
 
     view! {
         <div class="space-y-6">

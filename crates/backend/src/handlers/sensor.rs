@@ -6,7 +6,11 @@ use crate::{error::AppError, state::AppState};
 
 /// Constant-time comparison so the sensor token cannot be guessed byte by byte via timing.
 fn tokens_match(a: &str, b: &str) -> bool {
-    a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+    a.len() == b.len()
+        && a.bytes()
+            .zip(b.bytes())
+            .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+            == 0
 }
 
 /// Sensors authenticate with the shared secret in `SENSOR_API_TOKEN`, sent as

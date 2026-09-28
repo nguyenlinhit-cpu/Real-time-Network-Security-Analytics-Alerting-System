@@ -40,8 +40,9 @@ where
 fn trusted_proxies() -> &'static Vec<IpNetwork> {
     static PROXIES: OnceLock<Vec<IpNetwork>> = OnceLock::new();
     PROXIES.get_or_init(|| {
-        let raw = std::env::var("TRUSTED_PROXIES")
-            .unwrap_or_else(|_| "127.0.0.0/8,::1/128,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16".into());
+        let raw = std::env::var("TRUSTED_PROXIES").unwrap_or_else(|_| {
+            "127.0.0.0/8,::1/128,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16".into()
+        });
         raw.split(',')
             .filter_map(|s| s.trim().parse::<IpNetwork>().ok())
             .collect()

@@ -64,7 +64,10 @@ pub async fn export_reports(
             )));
         }
     }
-    let limit = query.limit.unwrap_or(MAX_EXPORT_ROWS).clamp(1, MAX_EXPORT_ROWS);
+    let limit = query
+        .limit
+        .unwrap_or(MAX_EXPORT_ROWS)
+        .clamp(1, MAX_EXPORT_ROWS);
 
     let alerts = sqlx::query_as::<_, Alert>(
         r#"

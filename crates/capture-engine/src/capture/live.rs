@@ -58,7 +58,10 @@ impl LiveCapture {
                     return;
                 }
                 Err(e) => {
-                    error!("Failed to open datalink channel on {} (requires root/CAP_NET_RAW): {}", iface_name, e);
+                    error!(
+                        "Failed to open datalink channel on {} (requires root/CAP_NET_RAW): {}",
+                        iface_name, e
+                    );
                     stats.mark_failed();
                     return;
                 }
@@ -87,11 +90,17 @@ impl LiveCapture {
                     }
                     Err(e) => {
                         consecutive_errors += 1;
-                        if consecutive_errors == 1 || consecutive_errors % 100 == 0 {
-                            warn!("Error reading packet ({} consecutive): {}", consecutive_errors, e);
+                        if consecutive_errors == 1 || consecutive_errors.is_multiple_of(100) {
+                            warn!(
+                                "Error reading packet ({} consecutive): {}",
+                                consecutive_errors, e
+                            );
                         }
                         if consecutive_errors >= 1000 {
-                            error!("Live capture on {} keeps failing; marking sensor as failed", iface_name);
+                            error!(
+                                "Live capture on {} keeps failing; marking sensor as failed",
+                                iface_name
+                            );
                             stats.mark_failed();
                             break;
                         }
@@ -171,7 +180,8 @@ impl LiveCapture {
         let mut ethertype = eth.get_ethertype().0;
         let mut eth_payload = eth.payload();
         // Strip (possibly stacked) VLAN tags.
-        while (ethertype == ETHERTYPE_VLAN || ethertype == ETHERTYPE_QINQ) && eth_payload.len() >= 4 {
+        while (ethertype == ETHERTYPE_VLAN || ethertype == ETHERTYPE_QINQ) && eth_payload.len() >= 4
+        {
             ethertype = u16::from_be_bytes([eth_payload[2], eth_payload[3]]);
             eth_payload = &eth_payload[4..];
         }
@@ -224,7 +234,8 @@ impl LiveCapture {
                 if eth_payload.len() < 40 {
                     return None;
                 }
-                let (next, l4) = Self::skip_ipv6_extensions(ip.get_next_header(), &eth_payload[40..])?;
+                let (next, l4) =
+                    Self::skip_ipv6_extensions(ip.get_next_header(), &eth_payload[40..])?;
                 (src, dst, next, l4)
             }
             _ => return None,

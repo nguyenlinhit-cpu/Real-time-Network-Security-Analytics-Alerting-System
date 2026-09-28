@@ -12,11 +12,14 @@ pub fn BlocklistPage() -> impl IntoView {
     let (reason_input, set_reason_input) = signal(String::new());
     let (show_modal, set_show_modal) = signal(false);
     let (status_msg, set_status_msg) = signal::<Option<String>>(None);
+    let (duration_secs, set_duration_secs) = signal::<Option<i64>>(Some(86_400));
+    let is_admin = ApiClient::is_admin();
 
     let load_blocklist = move || {
         leptos::task::spawn_local(async move {
-            if let Ok(data) = ApiClient::get_blocklist().await {
-                set_blocklist.set(data);
+            match ApiClient::get_blocklist().await {
+                Ok(data) => set_blocklist.set(data),
+                Err(e) => set_status_msg.set(Some(format!("Failed to load blocklist: {}", e))),
             }
         });
     };
@@ -27,9 +30,12 @@ pub fn BlocklistPage() -> impl IntoView {
 
     let on_unblock = move |id: Uuid| {
         leptos::task::spawn_local(async move {
-            if ApiClient::remove_from_blocklist(id).await.is_ok() {
-                set_blocklist.update(|list| list.retain(|item| item.id != id));
-                set_status_msg.set(Some("IP successfully removed from blocklist".to_string()));
+            match ApiClient::remove_from_blocklist(id).await {
+                Ok(()) => {
+                    set_blocklist.update(|list| list.retain(|item| item.id != id));
+                    set_status_msg.set(Some("IP successfully removed from blocklist".to_string()));
+                }
+                Err(e) => set_status_msg.set(Some(format!("Failed to unblock: {}", e))),
             }
         });
     };
@@ -43,14 +49,20 @@ pub fn BlocklistPage() -> impl IntoView {
             let dto = CreateBlockedIpDto {
                 ip_address: ip,
                 reason,
-                duration_seconds: Some(86400), // Default 24h
+                duration_seconds: duration_secs.get_untracked(),
             };
-            if let Ok(new_block) = ApiClient::add_to_blocklist(&dto).await {
-                set_blocklist.update(|list| list.insert(0, new_block));
-                set_show_modal.set(false);
-                set_ip_input.set(String::new());
-                set_reason_input.set(String::new());
-                set_status_msg.set(Some("IP successfully added to blocklist".to_string()));
+            match ApiClient::add_to_blocklist(&dto).await {
+                Ok(new_block) => {
+                    set_blocklist.update(|list| {
+                        list.retain(|b| b.id != new_block.id);
+                        list.insert(0, new_block);
+                    });
+                    set_show_modal.set(false);
+                    set_ip_input.set(String::new());
+                    set_reason_input.set(String::new());
+                    set_status_msg.set(Some("IP successfully added to blocklist".to_string()));
+                }
+                Err(e) => set_status_msg.set(Some(format!("Failed to block IP: {}", e))),
             }
         });
     };
@@ -63,9 +75,10 @@ pub fn BlocklistPage() -> impl IntoView {
                         "IP blocklist"
                     </h1>
                     <p class="text-xs text-ink-500 mt-1">
-                        "Automated firewall synchronization blocking flagged malicious threat actors"
+                        "Active blocks (manual and automatic). Mirrored into the host firewall when FIREWALL_ENFORCEMENT is enabled; expired entries are removed automatically."
                     </p>
                 </div>
+                {is_admin.then(|| view! {
                 <button
                     on:click=move |_| set_show_modal.set(true)
                     class="px-3.5 py-2 rounded-md bg-sev-critical hover:brightness-110 text-white text-xs font-bold transition-all flex items-center gap-2"
@@ -73,6 +86,7 @@ pub fn BlocklistPage() -> impl IntoView {
                     <IconPlus class="w-3.5 h-3.5".to_string() />
                     <span>"Block host IP"</span>
                 </button>
+                })}
             </div>
 
             // Status message
@@ -122,6 +136,19 @@ pub fn BlocklistPage() -> impl IntoView {
                                             on:input=move |e| set_reason_input.set(event_target_value(&e))
                                         />
                                     </div>
+                                    <div>
+                                        <label class="block text-[11px] font-mono font-semibold text-ink-500 uppercase tracking-wide mb-1.5">"Duration"</label>
+                                        <select
+                                            class="w-full bg-ink-950 border border-ink-600 rounded-md px-3 py-2 text-xs text-slate-300 focus:outline-none focus:border-sev-critical/60"
+                                            on:change=move |e| set_duration_secs.set(event_target_value(&e).parse::<i64>().ok())
+                                        >
+                                            <option value="3600">"1 hour"</option>
+                                            <option value="86400" selected>"24 hours"</option>
+                                            <option value="604800">"7 days"</option>
+                                            <option value="2592000">"30 days"</option>
+                                            <option value="permanent">"Permanent"</option>
+                                        </select>
+                                    </div>
                                     <div class="flex items-center justify-end gap-3 pt-2">
                                         <button
                                             type="button"
@@ -154,13 +181,14 @@ pub fn BlocklistPage() -> impl IntoView {
                             <th class="pb-3 px-3 font-mono">"Blocked IP / CIDR"</th>
                             <th class="pb-3 px-3 font-mono">"Mitigation reason"</th>
                             <th class="pb-3 px-3 font-mono">"Blocked at"</th>
+                            <th class="pb-3 px-3 font-mono">"Expires"</th>
                             <th class="pb-3 px-3 font-mono text-right">"Action"</th>
                         </tr>
                     </thead>
                     <tbody class="divide-y divide-ink-700">
                         <For
                             each=move || blocklist.get()
-                            key=|b| b.id
+                            key=|b| (b.id, b.blocked_at)
                             children=move |item| {
                                 let block_id = item.id;
                                 view! {
@@ -174,13 +202,18 @@ pub fn BlocklistPage() -> impl IntoView {
                                         <td class="py-3.5 px-3 text-ink-500 font-mono text-[11px] whitespace-nowrap">
                                             {item.blocked_at.format("%Y-%m-%d %H:%M:%S").to_string()}
                                         </td>
+                                        <td class="py-3.5 px-3 text-ink-500 font-mono text-[11px] whitespace-nowrap">
+                                            {item.blocked_until.map(|t| t.format("%Y-%m-%d %H:%M").to_string()).unwrap_or_else(|| "permanent".to_string())}
+                                        </td>
                                         <td class="py-3.5 px-3 text-right whitespace-nowrap">
+                                            {is_admin.then(|| view! {
                                             <button
                                                 class="px-2.5 py-1 rounded bg-brand/10 hover:bg-brand/20 text-brand border border-brand/30 text-[11px] font-medium transition-colors"
                                                 on:click=move |_| on_unblock(block_id)
                                             >
                                                 "Unblock"
                                             </button>
+                                            })}
                                         </td>
                                     </tr>
                                 }

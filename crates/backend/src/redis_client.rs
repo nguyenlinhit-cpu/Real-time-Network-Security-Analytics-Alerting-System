@@ -36,6 +36,15 @@ impl SimpleRedisClient {
         self.address.is_some()
     }
 
+    /// Password from `redis://:password@host:port` (or `redis://user:password@…`).
+    fn get_password(&self) -> Option<String> {
+        let addr = self.address.as_ref()?;
+        let rest = addr.trim_start_matches("redis://");
+        let (creds, _) = rest.split_once('@')?;
+        let password = creds.split_once(':').map(|(_, p)| p).unwrap_or(creds);
+        (!password.is_empty()).then(|| password.to_string())
+    }
+
     /// Helper to parse host and port from various URL formats (redis://host:port or host:port)
     fn get_host_port(&self) -> Option<String> {
         let addr = self.address.as_ref()?;
@@ -90,7 +99,9 @@ impl SimpleRedisClient {
                     .await
                     .map_err(|e| format!("Read error from Redis: {}", e))?;
                 buf.truncate(len as usize);
-                Ok(RespValue::Bulk(Some(String::from_utf8_lossy(&buf).into_owned())))
+                Ok(RespValue::Bulk(Some(
+                    String::from_utf8_lossy(&buf).into_owned(),
+                )))
             }
             _ => Err(format!("Unexpected Redis reply: {}", line)),
         }
@@ -109,8 +120,20 @@ impl SimpleRedisClient {
                 let stream = TcpStream::connect(&host_port)
                     .await
                     .map_err(|e| format!("Failed to connect to Redis at {}: {}", host_port, e))?;
+                let mut reader = BufReader::new(stream);
+                if let Some(password) = self.get_password() {
+                    reader
+                        .get_mut()
+                        .write_all(&Self::encode(&["AUTH", &password]))
+                        .await
+                        .map_err(|e| format!("Write error to Redis: {}", e))?;
+                    match Self::read_reply(&mut reader).await? {
+                        RespValue::Simple(ok) if ok == "OK" => {}
+                        other => return Err(format!("Redis AUTH failed: {:?}", other)),
+                    }
+                }
                 info!("Connected to distributed Redis instance at {}", host_port);
-                *guard = Some(BufReader::new(stream));
+                *guard = Some(reader);
             }
             let reader = guard.as_mut().expect("connection initialised above");
             reader
@@ -121,7 +144,12 @@ impl SimpleRedisClient {
             Self::read_reply(reader).await
         })
         .await
-        .unwrap_or_else(|_| Err(format!("Redis operation timed out ({:?})", REDIS_OP_TIMEOUT)));
+        .unwrap_or_else(|_| {
+            Err(format!(
+                "Redis operation timed out ({:?})",
+                REDIS_OP_TIMEOUT
+            ))
+        });
 
         match result {
             Ok(RespValue::Error(e)) => Err(format!("Redis error: {}", e)),

@@ -35,7 +35,9 @@ fn enum_param<T: serde::Serialize>(v: &T) -> String {
 }
 
 fn encode_component(s: &str) -> String {
-    js_sys::encode_uri_component(s).as_string().unwrap_or_default()
+    js_sys::encode_uri_component(s)
+        .as_string()
+        .unwrap_or_default()
 }
 
 pub struct ApiClient;
@@ -267,7 +269,9 @@ impl ApiClient {
                 Self::store_session(&data);
                 Ok(data)
             }
-            _ => Err(body.error.unwrap_or_else(|| "Authentication failed".to_string())),
+            _ => Err(body
+                .error
+                .unwrap_or_else(|| "Authentication failed".to_string())),
         }
     }
 
@@ -339,7 +343,12 @@ impl ApiClient {
     }
 
     pub async fn update_rule(id: uuid::Uuid, dto: &UpdateRuleDto) -> Result<DetectionRule, String> {
-        Self::request("PATCH", &format!("/api/rules/{}", id), Some(Self::to_value(dto)?)).await
+        Self::request(
+            "PATCH",
+            &format!("/api/rules/{}", id),
+            Some(Self::to_value(dto)?),
+        )
+        .await
     }
 
     pub async fn delete_rule(id: uuid::Uuid) -> Result<(), String> {
@@ -365,7 +374,12 @@ impl ApiClient {
     pub async fn create_notification_channel(
         dto: &CreateNotificationChannelDto,
     ) -> Result<NotificationChannel, String> {
-        Self::request("POST", "/api/notifications/channels", Some(Self::to_value(dto)?)).await
+        Self::request(
+            "POST",
+            "/api/notifications/channels",
+            Some(Self::to_value(dto)?),
+        )
+        .await
     }
 
     pub async fn update_notification_channel(

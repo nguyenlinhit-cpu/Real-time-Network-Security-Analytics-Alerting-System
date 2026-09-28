@@ -64,7 +64,12 @@ impl ZScoreAnomalyDetector {
         }
         let n = self.history.len() as f64;
         let mean = self.history.iter().sum::<f64>() / n;
-        let variance = self.history.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / n;
+        let variance = self
+            .history
+            .iter()
+            .map(|&x| (x - mean).powi(2))
+            .sum::<f64>()
+            / n;
         // Floor the deviation at 5% of the mean so near-constant traffic does not turn tiny
         // fluctuations into huge z-scores.
         let std_dev = variance.sqrt().max(mean * 0.05).max(1.0);

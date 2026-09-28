@@ -27,7 +27,9 @@ async fn setup() -> Option<(Router, PgPool)> {
         eprintln!("DATABASE_URL not set: skipping database integration test");
         return None;
     };
-    let pool = PgPool::connect(&url).await.expect("connect to test database");
+    let pool = PgPool::connect(&url)
+        .await
+        .expect("connect to test database");
     MIGRATED
         .get_or_init(|| async {
             sqlx::migrate!("../../migrations")
@@ -88,14 +90,18 @@ async fn call(
 
     let res = app.clone().oneshot(req).await.unwrap();
     let status = res.status();
-    let bytes = axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap();
+    let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)
+        .await
+        .unwrap();
     let json = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
     (status, json)
 }
 
 #[tokio::test]
 async fn rules_crud_round_trip() {
-    let Some((app, pool)) = setup().await else { return };
+    let Some((app, pool)) = setup().await else {
+        return;
+    };
     let admin = token_for(&pool, "admin").await;
     let viewer = token_for(&pool, "viewer").await;
 
@@ -161,7 +167,10 @@ async fn rules_crud_round_trip() {
     assert_eq!(body["data"]["threshold_value"], 20.0);
     assert_eq!(body["data"]["is_enabled"], false);
     assert!(body["data"]["mitre_technique"].is_null());
-    assert_eq!(body["data"]["mitre_tactic"], "Discovery", "unspecified fields are kept");
+    assert_eq!(
+        body["data"]["mitre_tactic"], "Discovery",
+        "unspecified fields are kept"
+    );
 
     let (status, _) = call(
         &app,
@@ -173,9 +182,23 @@ async fn rules_crud_round_trip() {
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
 
-    let (status, _) = call(&app, "DELETE", &format!("/api/rules/{}", id), Some(&admin), None).await;
+    let (status, _) = call(
+        &app,
+        "DELETE",
+        &format!("/api/rules/{}", id),
+        Some(&admin),
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
-    let (status, _) = call(&app, "GET", &format!("/api/rules/{}", id), Some(&admin), None).await;
+    let (status, _) = call(
+        &app,
+        "GET",
+        &format!("/api/rules/{}", id),
+        Some(&admin),
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 
     let audit: i64 = sqlx::query_scalar(
@@ -190,7 +213,9 @@ async fn rules_crud_round_trip() {
 
 #[tokio::test]
 async fn alert_status_lifecycle() {
-    let Some((app, pool)) = setup().await else { return };
+    let Some((app, pool)) = setup().await else {
+        return;
+    };
     let analyst = token_for(&pool, "analyst").await;
     let viewer = token_for(&pool, "viewer").await;
 
@@ -202,52 +227,144 @@ async fn alert_status_lifecycle() {
     .unwrap();
     let uri = format!("/api/alerts/{}", id);
 
-    let (status, _) = call(&app, "PATCH", &uri, Some(&viewer), Some(json!({"status": "acknowledged"}))).await;
+    let (status, _) = call(
+        &app,
+        "PATCH",
+        &uri,
+        Some(&viewer),
+        Some(json!({"status": "acknowledged"})),
+    )
+    .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
 
-    let (status, body) = call(&app, "PATCH", &uri, Some(&analyst), Some(json!({"status": "acknowledged"}))).await;
+    let (status, body) = call(
+        &app,
+        "PATCH",
+        &uri,
+        Some(&analyst),
+        Some(json!({"status": "acknowledged"})),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{}", body);
     assert!(!body["data"]["acknowledged_by"].is_null());
 
     // Re-opening un-assigns the incident (was: stayed locked to the analyst)
-    let (status, body) = call(&app, "PATCH", &uri, Some(&analyst), Some(json!({"status": "open"}))).await;
+    let (status, body) = call(
+        &app,
+        "PATCH",
+        &uri,
+        Some(&analyst),
+        Some(json!({"status": "open"})),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{}", body);
     assert!(body["data"]["acknowledged_by"].is_null());
 
-    let (status, body) = call(&app, "PATCH", &uri, Some(&analyst), Some(json!({"status": "resolved"}))).await;
+    let (status, body) = call(
+        &app,
+        "PATCH",
+        &uri,
+        Some(&analyst),
+        Some(json!({"status": "resolved"})),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{}", body);
     assert!(!body["data"]["resolved_at"].is_null());
 
-    let (status, _) = call(&app, "PATCH", &uri, Some(&analyst), Some(json!({"status": "acknowledged"}))).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "resolved -> acknowledged is not a valid transition");
+    let (status, _) = call(
+        &app,
+        "PATCH",
+        &uri,
+        Some(&analyst),
+        Some(json!({"status": "acknowledged"})),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "resolved -> acknowledged is not a valid transition"
+    );
 
     // Invalid IP filters are rejected instead of silently returning everything
-    let (status, _) = call(&app, "GET", "/api/alerts?src_ip=notanip", Some(&viewer), None).await;
+    let (status, _) = call(
+        &app,
+        "GET",
+        "/api/alerts?src_ip=notanip",
+        Some(&viewer),
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    let (status, _) = call(&app, "GET", "/api/traffic?dst_ip=999.1.1.1", Some(&viewer), None).await;
+    let (status, _) = call(
+        &app,
+        "GET",
+        "/api/traffic?dst_ip=999.1.1.1",
+        Some(&viewer),
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 
     // LIKE wildcards in search are literal
-    let (status, body) = call(&app, "GET", "/api/alerts?search=%25%25%25&limit=200", Some(&viewer), None).await;
+    let (status, body) = call(
+        &app,
+        "GET",
+        "/api/alerts?search=%25%25%25&limit=200",
+        Some(&viewer),
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
-    assert!(body["data"].as_array().unwrap().iter().all(|a| a["title"].as_str().unwrap().contains('%')));
+    assert!(body["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|a| a["title"].as_str().unwrap().contains('%')));
 
-    sqlx::query("DELETE FROM alerts WHERE id = $1").bind(id).execute(&pool).await.unwrap();
+    sqlx::query("DELETE FROM alerts WHERE id = $1")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
 async fn blocklist_validation_and_expiry() {
-    let Some((app, pool)) = setup().await else { return };
+    let Some((app, pool)) = setup().await else {
+        return;
+    };
     let admin = token_for(&pool, "admin").await;
 
     for (payload, expected) in [
-        (json!({"ip_address": "0.0.0.0/0", "reason": "everything"}), StatusCode::BAD_REQUEST),
-        (json!({"ip_address": "127.0.0.1", "reason": "loopback"}), StatusCode::BAD_REQUEST),
-        (json!({"ip_address": "5.6.7.0/24", "reason": "huge", "duration_seconds": 9223372036854775807i64}), StatusCode::UNPROCESSABLE_ENTITY),
-        (json!({"ip_address": "5.6.7.8", "reason": "negative", "duration_seconds": -3600}), StatusCode::UNPROCESSABLE_ENTITY),
-        (json!({"ip_address": "not-an-ip", "reason": "bad"}), StatusCode::BAD_REQUEST),
+        (
+            json!({"ip_address": "0.0.0.0/0", "reason": "everything"}),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            json!({"ip_address": "127.0.0.1", "reason": "loopback"}),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            json!({"ip_address": "5.6.7.0/24", "reason": "huge", "duration_seconds": 9223372036854775807i64}),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        (
+            json!({"ip_address": "5.6.7.8", "reason": "negative", "duration_seconds": -3600}),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        (
+            json!({"ip_address": "not-an-ip", "reason": "bad"}),
+            StatusCode::BAD_REQUEST,
+        ),
     ] {
-        let (status, body) = call(&app, "POST", "/api/blocklist", Some(&admin), Some(payload.clone())).await;
+        let (status, body) = call(
+            &app,
+            "POST",
+            "/api/blocklist",
+            Some(&admin),
+            Some(payload.clone()),
+        )
+        .await;
         assert_eq!(status, expected, "{} -> {}", payload, body);
     }
 
@@ -268,12 +385,29 @@ async fn blocklist_validation_and_expiry() {
         .await
         .unwrap();
     let (_, body) = call(&app, "GET", "/api/blocklist", Some(&admin), None).await;
-    let ips: Vec<&str> = body["data"].as_array().unwrap().iter().map(|b| b["ip_address"].as_str().unwrap()).collect();
+    let ips: Vec<&str> = body["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b["ip_address"].as_str().unwrap())
+        .collect();
     assert!(ips.iter().any(|ip| ip.starts_with("203.0.113.77")));
     assert!(!ips.iter().any(|ip| ip.starts_with("203.0.113.78")));
-    assert!(backend::handlers::blocklist::purge_expired_blocks(&pool).await.unwrap() >= 1);
+    assert!(
+        backend::handlers::blocklist::purge_expired_blocks(&pool)
+            .await
+            .unwrap()
+            >= 1
+    );
 
-    let (status, body) = call(&app, "DELETE", &format!("/api/blocklist/{}", id), Some(&admin), None).await;
+    let (status, body) = call(
+        &app,
+        "DELETE",
+        &format!("/api/blocklist/{}", id),
+        Some(&admin),
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert!(body["data"].as_str().unwrap().contains("203.0.113.77"));
     let audit: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_logs WHERE action = 'UNBLOCK_IP' AND target LIKE '203.0.113.77%'")
@@ -285,7 +419,9 @@ async fn blocklist_validation_and_expiry() {
 
 #[tokio::test]
 async fn notification_secrets_are_masked_for_non_admins() {
-    let Some((app, pool)) = setup().await else { return };
+    let Some((app, pool)) = setup().await else {
+        return;
+    };
     let admin = token_for(&pool, "admin").await;
     let analyst = token_for(&pool, "analyst").await;
 
@@ -297,14 +433,31 @@ async fn notification_secrets_are_masked_for_non_admins() {
         .await
         .unwrap();
 
-    let (_, body) = call(&app, "GET", "/api/notifications/channels", Some(&analyst), None).await;
+    let (_, body) = call(
+        &app,
+        "GET",
+        "/api/notifications/channels",
+        Some(&analyst),
+        None,
+    )
+    .await;
     let text = body.to_string();
     assert!(!text.contains("SECRETXYZ"), "Slack webhook path leaked");
     assert!(!text.contains("Bearer abc"), "nested header leaked");
     assert!(!text.contains("t0k"), "nested token leaked");
 
-    let (_, body) = call(&app, "GET", "/api/notifications/channels", Some(&admin), None).await;
-    assert!(body.to_string().contains("SECRETXYZ"), "admins see the real config");
+    let (_, body) = call(
+        &app,
+        "GET",
+        "/api/notifications/channels",
+        Some(&admin),
+        None,
+    )
+    .await;
+    assert!(
+        body.to_string().contains("SECRETXYZ"),
+        "admins see the real config"
+    );
 
     // Missing required config is rejected up front
     let (status, _) = call(
@@ -312,7 +465,9 @@ async fn notification_secrets_are_masked_for_non_admins() {
         "POST",
         "/api/notifications/channels",
         Some(&admin),
-        Some(json!({"name": "No URL", "type": "webhook", "config_json": {}, "min_severity": "high"})),
+        Some(
+            json!({"name": "No URL", "type": "webhook", "config_json": {}, "min_severity": "high"}),
+        ),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -324,7 +479,14 @@ async fn notification_secrets_are_masked_for_non_admins() {
         .fetch_one(&pool)
         .await
         .unwrap();
-    let (status, body) = call(&app, "POST", &format!("/api/notifications/test/{}", id), Some(&admin), None).await;
+    let (status, body) = call(
+        &app,
+        "POST",
+        &format!("/api/notifications/test/{}", id),
+        Some(&admin),
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(body["error"].as_str().unwrap().contains("SMTP"), "{}", body);
 
@@ -338,7 +500,9 @@ async fn notification_secrets_are_masked_for_non_admins() {
 
 #[tokio::test]
 async fn sensor_heartbeat_requires_token() {
-    let Some((app, _pool)) = setup().await else { return };
+    let Some((app, _pool)) = setup().await else {
+        return;
+    };
     let (status, _) = call(
         &app,
         "POST",
@@ -356,7 +520,9 @@ async fn sensor_heartbeat_requires_token() {
 
 #[tokio::test]
 async fn login_lockout_covers_email_login() {
-    let Some((app, pool)) = setup().await else { return };
+    let Some((app, pool)) = setup().await else {
+        return;
+    };
     let username = format!("lock{}", &Uuid::new_v4().simple().to_string()[..8]);
     let email = format!("{}@example.com", username);
     let (status, _) = call(
@@ -376,11 +542,25 @@ async fn login_lockout_covers_email_login() {
     assert_eq!(role, "viewer", "self-registration can never pick a role");
 
     for _ in 0..5 {
-        let (status, _) = call(&app, "POST", "/api/auth/login", None, Some(json!({"username": username, "password": "wrong"}))).await;
+        let (status, _) = call(
+            &app,
+            "POST",
+            "/api/auth/login",
+            None,
+            Some(json!({"username": username, "password": "wrong"})),
+        )
+        .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
     // Same account via e-mail shares the counter (was a bypass)
-    let (status, _) = call(&app, "POST", "/api/auth/login", None, Some(json!({"username": email, "password": "Correct-Horse-1"}))).await;
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/api/auth/login",
+        None,
+        Some(json!({"username": email, "password": "Correct-Horse-1"})),
+    )
+    .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
 
     let ip: Option<String> = sqlx::query_scalar("SELECT host(ip_address) FROM audit_logs WHERE action = 'LOGIN_FAILED' AND target = $1 LIMIT 1")
@@ -390,12 +570,18 @@ async fn login_lockout_covers_email_login() {
         .unwrap();
     assert!(ip.is_some(), "audit log records the client IP");
 
-    sqlx::query("DELETE FROM users WHERE username = $1").bind(&username).execute(&pool).await.unwrap();
+    sqlx::query("DELETE FROM users WHERE username = $1")
+        .bind(&username)
+        .execute(&pool)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
 async fn long_dns_flags_are_stored() {
-    let Some((_app, pool)) = setup().await else { return };
+    let Some((_app, pool)) = setup().await else {
+        return;
+    };
     let flags = format!("DNS:{}.c2.tunnel-exfil.net", "a".repeat(60));
     let id = Uuid::new_v4();
     sqlx::query("INSERT INTO traffic_events (time, id, src_ip, dst_ip, src_port, dst_port, protocol, bytes_transferred, packet_count, flags, interface_name) VALUES (NOW(), $1, '10.0.0.1', '8.8.8.8', 5000, 53, 'UDP', 100, 1, $2, 'test0')")
@@ -404,15 +590,24 @@ async fn long_dns_flags_are_stored() {
         .execute(&pool)
         .await
         .expect("long DNS flags must fit (was VARCHAR(20))");
-    sqlx::query("DELETE FROM traffic_events WHERE id = $1").bind(id).execute(&pool).await.unwrap();
+    sqlx::query("DELETE FROM traffic_events WHERE id = $1")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
 async fn dashboard_summary_counts() {
-    let Some((app, pool)) = setup().await else { return };
+    let Some((app, pool)) = setup().await else {
+        return;
+    };
     let viewer = token_for(&pool, "viewer").await;
     let (status, body) = call(&app, "GET", "/api/dashboard/summary", Some(&viewer), None).await;
     assert_eq!(status, StatusCode::OK, "{}", body);
     assert!(body["data"]["critical_alerts"].is_i64());
-    assert!(body["data"]["total_alerts"].as_i64().unwrap() >= body["data"]["critical_alerts"].as_i64().unwrap());
+    assert!(
+        body["data"]["total_alerts"].as_i64().unwrap()
+            >= body["data"]["critical_alerts"].as_i64().unwrap()
+    );
 }

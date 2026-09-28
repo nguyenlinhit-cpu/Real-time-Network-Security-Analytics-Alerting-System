@@ -14,6 +14,22 @@ jobs:
   test:
     name: Test Workspace
     runs-on: ubuntu-latest
+    services:
+      timescaledb:
+        image: timescale/timescaledb:2.14.2-pg15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: network_security
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # Enables the database integration tests (crates/backend/tests/api_db_tests.rs)
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/network_security
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4

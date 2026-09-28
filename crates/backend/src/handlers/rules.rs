@@ -246,11 +246,12 @@ pub async fn delete_rule(
 ) -> Result<Json<ApiResponse<String>>, AppError> {
     require_admin(&current_user)?;
 
-    let name: String = sqlx::query_scalar("DELETE FROM detection_rules WHERE id = $1 RETURNING name")
-        .bind(id)
-        .fetch_optional(&state.pool)
-        .await?
-        .ok_or_else(|| AppError::NotFound(format!("Rule {} not found", id)))?;
+    let name: String =
+        sqlx::query_scalar("DELETE FROM detection_rules WHERE id = $1 RETURNING name")
+            .bind(id)
+            .fetch_optional(&state.pool)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("Rule {} not found", id)))?;
 
     audit::record(
         &state.pool,

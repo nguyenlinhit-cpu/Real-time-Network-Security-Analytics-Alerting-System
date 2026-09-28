@@ -178,7 +178,6 @@ fn test_syn_flood_detector_triggers_and_rejects_ack() {
     assert!(detector.last_alert_auto_blockable());
 }
 
-
 #[test]
 fn test_brute_force_detector_triggers_on_sensitive_ports() {
     let mut detector = BruteForceDetector::new(3, 10);
@@ -545,7 +544,15 @@ fn test_syn_flood_distributed_sources_not_auto_blockable() {
     let mut alert = None;
     for i in 0..10 {
         let src = format!("198.51.100.{}/32", i + 1);
-        alert = detector.evaluate(&make_event(&src, "192.168.1.50/32", 40000, 80, "TCP", "SYN", 40));
+        alert = detector.evaluate(&make_event(
+            &src,
+            "192.168.1.50/32",
+            40000,
+            80,
+            "TCP",
+            "SYN",
+            40,
+        ));
     }
     let alert = alert.expect("distributed flood must still be detected");
     assert!(alert.description.contains("distinct sources"));
@@ -563,16 +570,32 @@ fn test_dns_tunneling_deduplicates_per_base_domain() {
         let _ = i;
         let flags = format!("DNS:{}.c2.tunnel-exfil.net", Uuid::new_v4().simple());
         if detector
-            .evaluate(&make_event("192.168.1.188/32", "8.8.8.8/32", 50000, 53, "UDP", &flags, 120))
+            .evaluate(&make_event(
+                "192.168.1.188/32",
+                "8.8.8.8/32",
+                50000,
+                53,
+                "UDP",
+                &flags,
+                120,
+            ))
             .is_some()
         {
             alerts += 1;
         }
     }
-    assert_eq!(alerts, 1, "one exfiltration session must produce a single alert");
+    assert_eq!(
+        alerts, 1,
+        "one exfiltration session must produce a single alert"
+    );
 }
 
-fn rule_model(name: &str, severity: AlertSeverity, threshold: f64, window: i32) -> common::models::DetectionRule {
+fn rule_model(
+    name: &str,
+    severity: AlertSeverity,
+    threshold: f64,
+    window: i32,
+) -> common::models::DetectionRule {
     common::models::DetectionRule {
         id: Uuid::new_v4(),
         name: name.to_string(),
@@ -592,7 +615,15 @@ fn rule_model(name: &str, severity: AlertSeverity, threshold: f64, window: i32) 
 async fn run_port_scan(engine: &mut capture_engine::detection::engine::DetectionEngine) {
     for p in 1..=20 {
         engine
-            .process_event(&make_event("10.9.9.9/32", "192.168.1.50/32", 40000, 1000 + p, "TCP", "SYN", 64))
+            .process_event(&make_event(
+                "10.9.9.9/32",
+                "192.168.1.50/32",
+                40000,
+                1000 + p,
+                "TCP",
+                "SYN",
+                64,
+            ))
             .await;
     }
 }
@@ -610,7 +641,11 @@ async fn test_engine_applies_db_severity_and_disables_deleted_rules() {
     run_port_scan(&mut engine).await;
     let alert = rx.try_recv().expect("port scan alert expected");
     assert_eq!(alert.rule_id, Some(cfg_id));
-    assert_eq!(alert.severity, AlertSeverity::Low, "severity must come from the DB rule");
+    assert_eq!(
+        alert.severity,
+        AlertSeverity::Low,
+        "severity must come from the DB rule"
+    );
     assert_eq!(alert.mitre_technique.as_deref(), Some("T1595"));
 
     // Rule deleted in the UI (DB synced without it): the detector must stop, instead of
@@ -619,7 +654,10 @@ async fn test_engine_applies_db_severity_and_disables_deleted_rules() {
     let mut engine2 = DetectionEngine::new(tx2);
     engine2.apply_rule_configs(vec![]);
     run_port_scan(&mut engine2).await;
-    assert!(rx2.try_recv().is_err(), "deleted rule must not produce alerts");
+    assert!(
+        rx2.try_recv().is_err(),
+        "deleted rule must not produce alerts"
+    );
 }
 
 #[tokio::test]
@@ -629,13 +667,22 @@ async fn test_engine_executes_custom_rules() {
     let mut engine = DetectionEngine::new(tx);
 
     let mut custom = rule_model("Telnet burst", AlertSeverity::High, 5.0, 10);
-    custom.condition_json = serde_json::json!({"metric": "packet_rate", "group_by": "src_ip", "dst_port": 23});
+    custom.condition_json =
+        serde_json::json!({"metric": "packet_rate", "group_by": "src_ip", "dst_port": 23});
     let custom_id = custom.id;
     engine.apply_rule_configs(vec![custom]);
 
     for _ in 0..5 {
         engine
-            .process_event(&make_event("10.1.2.3/32", "192.168.1.9/32", 40000, 23, "TCP", "ACK", 64))
+            .process_event(&make_event(
+                "10.1.2.3/32",
+                "192.168.1.9/32",
+                40000,
+                23,
+                "TCP",
+                "ACK",
+                64,
+            ))
             .await;
     }
     let alert = rx.try_recv().expect("custom rule must fire");
@@ -701,7 +748,16 @@ async fn test_simulator_covers_all_eight_detectors() {
     while let Ok(a) = rx.try_recv() {
         titles.insert(a.mitre_technique.clone().unwrap_or_default());
     }
-    for technique in ["T1046", "T1498", "T1110", "T1557", "T1071.004", "T1020", "T1498.001", "T1071"] {
+    for technique in [
+        "T1046",
+        "T1498",
+        "T1110",
+        "T1557",
+        "T1071.004",
+        "T1020",
+        "T1498.001",
+        "T1071",
+    ] {
         assert!(
             titles.contains(technique),
             "scenario for {} produced no alert (got {:?})",

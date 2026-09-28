@@ -31,7 +31,11 @@ pub fn App() -> impl IntoView {
 
     let initial_role = initial_user.as_ref().map(|u| u.role);
     let initial_tab = match hash_tab {
-        Some(tab) if initial_user.is_some() && tab != "login" && tab_allowed(&tab, initial_role) => tab,
+        Some(tab)
+            if initial_user.is_some() && tab != "login" && tab_allowed(&tab, initial_role) =>
+        {
+            tab
+        }
         _ if initial_user.is_some() => "dashboard".to_string(),
         _ => "login".to_string(),
     };

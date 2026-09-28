@@ -23,9 +23,18 @@ const MASK: &str = "********";
 
 fn is_secret_key(key: &str) -> bool {
     let k = key.to_lowercase();
-    ["token", "password", "secret", "key", "auth", "credential", "header", "cookie"]
-        .iter()
-        .any(|s| k.contains(s))
+    [
+        "token",
+        "password",
+        "secret",
+        "key",
+        "auth",
+        "credential",
+        "header",
+        "cookie",
+    ]
+    .iter()
+    .any(|s| k.contains(s))
 }
 
 /// Keeps only `scheme://host` of a URL: webhook URLs (Slack, SIEM…) often embed secrets in
@@ -332,7 +341,9 @@ pub async fn test_channel(
         .dispatch_single_channel(id, &test_alert)
         .await
         .map_err(|e| match e {
-            AppError::Internal(msg) => AppError::BadRequest(format!("Test delivery failed: {}", msg)),
+            AppError::Internal(msg) => {
+                AppError::BadRequest(format!("Test delivery failed: {}", msg))
+            }
             other => other,
         })?;
     Ok(Json(ApiResponse::ok(format!(

@@ -50,7 +50,11 @@ pub struct CreateRuleDto {
     pub is_enabled: Option<bool>,
     #[validate(range(min = 0.0, message = "Threshold must be non-negative"))]
     pub threshold_value: f64,
-    #[validate(range(min = 1, max = 86_400, message = "Time window must be between 1 and 86400 seconds"))]
+    #[validate(range(
+        min = 1,
+        max = 86_400,
+        message = "Time window must be between 1 and 86400 seconds"
+    ))]
     pub time_window_seconds: i32,
     #[validate(length(max = 50))]
     pub mitre_tactic: Option<String>,
@@ -69,7 +73,11 @@ pub struct UpdateRuleDto {
     pub is_enabled: Option<bool>,
     #[validate(range(min = 0.0, message = "Threshold must be non-negative"))]
     pub threshold_value: Option<f64>,
-    #[validate(range(min = 1, max = 86_400, message = "Time window must be between 1 and 86400 seconds"))]
+    #[validate(range(
+        min = 1,
+        max = 86_400,
+        message = "Time window must be between 1 and 86400 seconds"
+    ))]
     pub time_window_seconds: Option<i32>,
     #[validate(length(max = 50))]
     pub mitre_tactic: Option<String>,

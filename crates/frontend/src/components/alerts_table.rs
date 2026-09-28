@@ -103,7 +103,7 @@ pub fn AlertsTable(
                                 list.push(alert);
                             }
                         }
-                        list.sort_by(|a, b| b.detected_at.cmp(&a.detected_at));
+                        list.sort_by_key(|a| std::cmp::Reverse(a.detected_at));
                     });
                 }
                 Err(e) => set_action_error.set(Some(e)),

@@ -97,7 +97,10 @@ async fn stream_to_socket<T: Clone + Serialize>(
         }
     }
 
-    info!("{} disconnected from {} stream", claims.username, stream_name);
+    info!(
+        "{} disconnected from {} stream",
+        claims.username, stream_name
+    );
 }
 
 pub async fn ws_alerts_handler(

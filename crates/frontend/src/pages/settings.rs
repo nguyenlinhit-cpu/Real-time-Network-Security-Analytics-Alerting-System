@@ -83,7 +83,10 @@ pub fn SettingsPage() -> impl IntoView {
                             list[pos] = updated;
                         }
                     });
-                    set_status_msg.set(Some(format!("Channel {}", if enable { "enabled" } else { "disabled" })));
+                    set_status_msg.set(Some(format!(
+                        "Channel {}",
+                        if enable { "enabled" } else { "disabled" }
+                    )));
                 }
                 Err(e) => set_status_msg.set(Some(format!("Failed to update channel: {}", e))),
             }

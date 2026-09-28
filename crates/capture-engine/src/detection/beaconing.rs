@@ -1,10 +1,10 @@
 use chrono::Utc;
+use chrono::{DateTime, Utc as ChronoUtc};
 use common::models::{
     Alert, AlertSeverity, AlertStatus, DetectionRule as RuleModel, RuleType, TrafficEvent,
 };
 use ipnetwork::IpNetwork;
 use std::collections::{HashMap, VecDeque};
-use chrono::{DateTime, Utc as ChronoUtc};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 

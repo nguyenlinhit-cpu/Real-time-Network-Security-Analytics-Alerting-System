@@ -4,6 +4,7 @@ use capture_engine::detection::engine::{
     spawn_alert_persister, spawn_auto_blocker, spawn_firewall_sync, DetectionEngine,
 };
 use common::models::{Alert, TrafficBatchDto, TrafficEvent};
+use ipnetwork::IpNetwork;
 use sqlx::postgres::{PgListener, PgPoolOptions};
 use sqlx::PgPool;
 use std::net::IpAddr;
@@ -107,6 +108,85 @@ fn traffic_notification(events: &[TrafficEvent]) -> Option<String> {
     }
 }
 
+fn is_local_address(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => v4.is_private() || v4.is_link_local(),
+        IpAddr::V6(v6) => {
+            (v6.segments()[0] & 0xfe00) == 0xfc00 || (v6.segments()[0] & 0xffc0) == 0xfe80
+        }
+    }
+}
+
+fn valid_mac(mac: &str) -> bool {
+    let parts: Vec<&str> = mac.split(':').collect();
+    parts.len() == 6
+        && parts
+            .iter()
+            .all(|p| p.len() == 2 && p.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
+/// Maintains the device inventory: every local (RFC1918 / ULA / link-local) address seen in
+/// traffic is recorded with its last-seen time; ARP packets also provide the MAC address
+/// (only filled in when unknown, so a spoofed ARP reply cannot overwrite a known binding).
+async fn upsert_devices(events: &[TrafficEvent], pool: &PgPool) {
+    let mut seen: std::collections::HashMap<
+        IpNetwork,
+        (Option<String>, chrono::DateTime<chrono::Utc>),
+    > = std::collections::HashMap::new();
+    for ev in events {
+        for ip in [ev.src_ip, ev.dst_ip] {
+            if !is_local_address(&ip.ip()) || ip.ip().is_unspecified() {
+                continue;
+            }
+            let entry = seen.entry(ip).or_insert((None, ev.time));
+            if ev.time > entry.1 {
+                entry.1 = ev.time;
+            }
+        }
+        if ev.protocol == "ARP" {
+            if let Some(mac) = ev
+                .flags
+                .strip_prefix("MAC:")
+                .map(|m| m.trim().to_lowercase())
+            {
+                if valid_mac(&mac) {
+                    if let Some(entry) = seen.get_mut(&ev.src_ip) {
+                        entry.0.get_or_insert(mac);
+                    }
+                }
+            }
+        }
+    }
+    if seen.is_empty() {
+        return;
+    }
+    let mut ips = Vec::with_capacity(seen.len());
+    let mut macs = Vec::with_capacity(seen.len());
+    let mut times = Vec::with_capacity(seen.len());
+    for (ip, (mac, t)) in seen {
+        ips.push(ip);
+        macs.push(mac);
+        times.push(t);
+    }
+    let res = sqlx::query(
+        r#"
+        INSERT INTO devices (ip_address, mac_address, first_seen, last_seen)
+        SELECT ip, mac::macaddr, ts, ts FROM UNNEST(async fn flush_traffic_batch(::inet[], ::text[], ::timestamptz[]) AS t(ip, mac, ts)
+        ON CONFLICT (ip_address) DO UPDATE SET
+            last_seen = GREATEST(devices.last_seen, EXCLUDED.last_seen),
+            mac_address = COALESCE(devices.mac_address, EXCLUDED.mac_address)
+        "#,
+    )
+    .bind(ips)
+    .bind(macs)
+    .bind(times)
+    .execute(pool)
+    .await;
+    if let Err(e) = res {
+        warn!("Device inventory update failed: {}", e);
+    }
+}
+
 async fn flush_traffic_batch(events: &[TrafficEvent], pool: &PgPool, stats: &SensorStats) {
     if events.is_empty() {
         return;
@@ -138,6 +218,8 @@ async fn flush_traffic_batch(events: &[TrafficEvent], pool: &PgPool, stats: &Sen
         );
         return;
     }
+
+    upsert_devices(events, pool).await;
 
     if let Some(payload) = traffic_notification(events) {
         if let Err(e) = sqlx::query("SELECT pg_notify('new_traffic', $1)")
@@ -200,7 +282,12 @@ fn spawn_rule_listener(pool: Arc<PgPool>, engine: Arc<Mutex<DetectionEngine>>) {
             }
             info!("📡 Detection engine subscribed to 'rules_changed' notification channel");
             // Pick up changes made while the listener was down.
-            if let Err(e) = engine.lock().await.reload_rules_from_db(pool.as_ref()).await {
+            if let Err(e) = engine
+                .lock()
+                .await
+                .reload_rules_from_db(pool.as_ref())
+                .await
+            {
                 warn!("Rule reload failed: {}", e);
             }
 
@@ -208,7 +295,12 @@ fn spawn_rule_listener(pool: Arc<PgPool>, engine: Arc<Mutex<DetectionEngine>>) {
                 match listener.recv().await {
                     Ok(_) => {
                         info!("🔄 Rule change notification received; reloading rules from DB");
-                        if let Err(e) = engine.lock().await.reload_rules_from_db(pool.as_ref()).await {
+                        if let Err(e) = engine
+                            .lock()
+                            .await
+                            .reload_rules_from_db(pool.as_ref())
+                            .await
+                        {
                             warn!("Rule reload failed: {}", e);
                         }
                     }
@@ -293,20 +385,23 @@ fn spawn_simulation(
     // Background traffic between two attack scenarios (~8 s) so each attack stands on its own.
     let idle_gap_packets = (packets_per_sec * 8).max(40);
 
-    let rotation: Vec<(&'static str, AttackScenario)> =
-        if scenario_type.eq_ignore_ascii_case("all") {
-            AttackScenario::demo_rotation()
-        } else if scenario_type.eq_ignore_ascii_case("none") {
-            Vec::new()
-        } else {
-            match AttackScenario::from_name(&scenario_type) {
-                Some(s) => vec![("custom", s)],
-                None => {
-                    warn!("Unknown DEMO_SCENARIO '{}'; running background traffic only", scenario_type);
-                    Vec::new()
-                }
+    let rotation: Vec<(&'static str, AttackScenario)> = if scenario_type.eq_ignore_ascii_case("all")
+    {
+        AttackScenario::demo_rotation()
+    } else if scenario_type.eq_ignore_ascii_case("none") {
+        Vec::new()
+    } else {
+        match AttackScenario::from_name(&scenario_type) {
+            Some(s) => vec![("custom", s)],
+            None => {
+                warn!(
+                    "Unknown DEMO_SCENARIO '{}'; running background traffic only",
+                    scenario_type
+                );
+                Vec::new()
             }
-        };
+        }
+    };
 
     info!(
         "Simulation: {} pkt/s background traffic, demo scenario '{}'",
@@ -445,7 +540,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let start_simulation = if simulation_mode {
         true
     } else {
-        info!("Running in LIVE CAPTURE mode on interface '{}'", interface_name);
+        info!(
+            "Running in LIVE CAPTURE mode on interface '{}'",
+            interface_name
+        );
         let mut exclusions = Vec::new();
         if let Some(url) = database_url.as_deref() {
             exclusions.extend(service_endpoint(url, 5432).await);
@@ -468,7 +566,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 false
             }
             Err(e) => {
-                error!("Could not start live capture on '{}': {}", interface_name, e);
+                error!(
+                    "Could not start live capture on '{}': {}",
+                    interface_name, e
+                );
                 if env_flag("LIVE_FALLBACK_TO_SIMULATION", false) {
                     warn!("LIVE_FALLBACK_TO_SIMULATION=true: switching to simulated traffic");
                     true
@@ -481,7 +582,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     if start_simulation {
-        info!("Running in SIMULATION MODE on interface '{}'", interface_name);
+        info!(
+            "Running in SIMULATION MODE on interface '{}'",
+            interface_name
+        );
         spawn_simulation(
             interface_name.clone(),
             engine.clone(),

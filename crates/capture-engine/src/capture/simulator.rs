@@ -153,6 +153,7 @@ impl TrafficSimulator {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn event(
         &self,
         src: IpNetwork,
@@ -227,8 +228,12 @@ impl TrafficSimulator {
         };
 
         self.event(
-            src_ips[rng.gen_range(0..src_ips.len())].parse().expect("valid literal IP"),
-            dst_ips[rng.gen_range(0..dst_ips.len())].parse().expect("valid literal IP"),
+            src_ips[rng.gen_range(0..src_ips.len())]
+                .parse()
+                .expect("valid literal IP"),
+            dst_ips[rng.gen_range(0..dst_ips.len())]
+                .parse()
+                .expect("valid literal IP"),
             rng.gen_range(49152..65535),
             dst_port,
             protocol,

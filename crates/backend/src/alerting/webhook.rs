@@ -257,7 +257,13 @@ impl NotificationChannel for WebhookChannel {
                 }
                 Ok(res) => {
                     let status = res.status();
-                    let body: String = res.text().await.unwrap_or_default().chars().take(300).collect();
+                    let body: String = res
+                        .text()
+                        .await
+                        .unwrap_or_default()
+                        .chars()
+                        .take(300)
+                        .collect();
                     let msg = format!(
                         "Webhook responded with non-2xx status code {}: {}",
                         status, body

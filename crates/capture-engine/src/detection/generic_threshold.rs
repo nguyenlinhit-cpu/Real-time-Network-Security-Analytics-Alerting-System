@@ -108,10 +108,7 @@ impl DetectionRule for GenericThresholdDetector {
             .get("protocol")
             .and_then(|v| v.as_str())
             .map(|s| s.to_uppercase());
-        self.dst_port = c
-            .get("dst_port")
-            .and_then(|v| v.as_i64())
-            .map(|p| p as i32);
+        self.dst_port = c.get("dst_port").and_then(|v| v.as_i64()).map(|p| p as i32);
         self.flags = c
             .get("flags")
             .and_then(|v| v.as_str())

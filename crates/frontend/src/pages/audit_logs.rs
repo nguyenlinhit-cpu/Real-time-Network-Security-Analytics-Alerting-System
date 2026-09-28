@@ -108,7 +108,7 @@ pub fn AuditLogsPage() -> impl IntoView {
 
                                     let time_formatted = log.timestamp.format("%Y-%m-%d %H:%M:%S UTC").to_string();
                                     let user_disp = log.user_id.map(|u| u.to_string()).unwrap_or_else(|| "System / Automated".to_string());
-                                    let ip_disp = log.ip_address.map(|ip| ip.to_string()).unwrap_or_else(|| "127.0.0.1".to_string());
+                                    let ip_disp = log.ip_address.map(|ip| ip.ip().to_string()).unwrap_or_else(|| "—".to_string());
 
                                     view! {
                                         <tr class="hover:bg-ink-800/40 transition-colors">

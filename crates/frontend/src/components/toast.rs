@@ -3,9 +3,23 @@ use leptos::prelude::*;
 
 use crate::components::icons::{IconAlert, IconBell, IconClose};
 
+thread_local! {
+    /// Browsers cap the number of live AudioContexts, so one is created lazily and reused.
+    static AUDIO_CTX: std::cell::RefCell<Option<web_sys::AudioContext>> = const { std::cell::RefCell::new(None) };
+}
+
 fn play_critical_sound() {
-    // Safe Web Audio API invocation without js_sys::eval (Mục 53)
-    if let Ok(ctx) = web_sys::AudioContext::new() {
+    // Web Audio API without js_sys::eval (Mục 53)
+    let ctx = AUDIO_CTX.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.is_none() {
+            *slot = web_sys::AudioContext::new().ok();
+        }
+        slot.clone()
+    });
+    if let Some(ctx) = ctx {
+        // Autoplay policy may leave the context suspended until the user interacts.
+        let _ = ctx.resume();
         if let (Ok(osc), Ok(gain)) = (ctx.create_oscillator(), ctx.create_gain()) {
             osc.set_type(web_sys::OscillatorType::Sawtooth);
             let now = ctx.current_time();

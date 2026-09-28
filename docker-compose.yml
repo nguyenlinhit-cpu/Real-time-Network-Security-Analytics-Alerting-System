@@ -10,8 +10,9 @@ services:
     ports:
       - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
+      # Schema is managed only by the backend's embedded sqlx migrations (single source of
+      # truth); mounting migrations into docker-entrypoint-initdb.d as well applied them twice.
       - timescale_data:/var/lib/postgresql/data
-      - ./migrations:/docker-entrypoint-initdb.d:ro
     networks:
       - secnet_mesh
     healthcheck:
@@ -24,12 +25,15 @@ services:
     image: redis:7-alpine
     container_name: secnet_redis
     restart: unless-stopped
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:-secnet_redis_dev_password}"]
+    environment:
+      REDISCLI_AUTH: ${REDIS_PASSWORD:-secnet_redis_dev_password}
     ports:
       - "127.0.0.1:${REDIS_PORT:-6379}:6379"
     networks:
       - secnet_mesh
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "redis-cli ping | grep PONG"]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -47,12 +51,15 @@ services:
         condition: service_healthy
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@timescaledb:5432/${POSTGRES_DB:-network_security}
-      REDIS_URL: redis://redis:6379
+      REDIS_URL: redis://:${REDIS_PASSWORD:-secnet_redis_dev_password}@redis:6379
       SERVER_HOST: 0.0.0.0
       SERVER_PORT: 8080
       ENVIRONMENT: ${ENVIRONMENT:-development}
       JWT_SECRET: ${JWT_SECRET:-super_secret_jwt_key_at_least_32_bytes_long_12345}
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:3000,https://localhost,http://localhost:80}
+      ALERT_DEDUPLICATION_WINDOW_SECONDS: ${ALERT_DEDUPLICATION_WINDOW_SECONDS:-60}
+      SENSOR_API_TOKEN: ${SENSOR_API_TOKEN:-}
+      METRICS_TOKEN: ${METRICS_TOKEN:-}
       RUST_LOG: ${RUST_LOG:-info,backend=debug}
     ports:
       - "127.0.0.1:8080:8080"
@@ -75,7 +82,8 @@ services:
       backend:
         condition: service_healthy
     ports:
-      - "3000:80"
+      # Plain HTTP: loopback only. Remote users go through the TLS proxy on 443.
+      - "127.0.0.1:3000:80"
     networks:
       - secnet_mesh
     healthcheck:
@@ -118,8 +126,14 @@ services:
         condition: service_healthy
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@timescaledb:5432/${POSTGRES_DB:-network_security}
-      SIMULATION_MODE: "true"
-      SIMULATION_PACKETS_PER_SEC: 500
+      SIMULATION_MODE: ${SIMULATION_MODE:-true}
+      SIMULATION_PACKETS_PER_SEC: ${SIMULATION_PACKETS_PER_SEC:-200}
+      DEMO_SCENARIO: ${DEMO_SCENARIO:-all}
+      SENSOR_ID: ${SENSOR_ID:-sensor-docker-01}
+      AUTO_BLOCK_CRITICAL_IPS: ${AUTO_BLOCK_CRITICAL_IPS:-true}
+      # Mirroring the blocklist into iptables only works in the host network namespace:
+      # set FIREWALL_ENFORCEMENT=true together with `network_mode: host` for live deployments.
+      FIREWALL_ENFORCEMENT: ${FIREWALL_ENFORCEMENT:-false}
       CAPTURE_INTERFACE: "eth0"
       RULES_STATE_FILE: "/data/secnet_rules_state.json"
       RUST_LOG: "info,capture_engine=debug"

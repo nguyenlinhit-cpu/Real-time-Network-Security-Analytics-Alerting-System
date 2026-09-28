@@ -104,8 +104,10 @@ impl NotificationChannel for EmailChannel {
                     AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&self.smtp_host)
                         .map_err(|e| AppError::Internal(format!("Invalid SMTP host: {}", e)))?
                 }
-                SmtpSecurity::Tls => AsyncSmtpTransport::<Tokio1Executor>::relay(&self.smtp_host)
-                    .map_err(|e| AppError::Internal(format!("Invalid SMTP host: {}", e)))?,
+                SmtpSecurity::Tls => {
+                    AsyncSmtpTransport::<Tokio1Executor>::relay(&self.smtp_host)
+                        .map_err(|e| AppError::Internal(format!("Invalid SMTP host: {}", e)))?
+                }
                 SmtpSecurity::None => {
                     AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&self.smtp_host)
                 }

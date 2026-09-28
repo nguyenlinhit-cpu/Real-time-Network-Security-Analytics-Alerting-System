@@ -19,7 +19,11 @@ fn build_channel(ch: &ChannelModel) -> Box<dyn NotificationChannel> {
                 .to_string();
             let port = ch.config_json["smtp_port"]
                 .as_u64()
-                .or_else(|| ch.config_json["smtp_port"].as_str().and_then(|s| s.parse().ok()))
+                .or_else(|| {
+                    ch.config_json["smtp_port"]
+                        .as_str()
+                        .and_then(|s| s.parse().ok())
+                })
                 .and_then(|p| u16::try_from(p).ok())
                 .unwrap_or(587);
             let to = ch.config_json["to_email"]
@@ -136,11 +140,7 @@ impl AlertDispatcher {
     /// Dispatch alert to all matching, enabled notification channels concurrently
     pub async fn dispatch(&self, alert: &Alert) -> Result<(), AppError> {
         // 1. Throttling / Deduplication check (distributed via Redis if active)
-        if self
-            .throttler
-            .should_throttle_alert(alert)
-            .await
-        {
+        if self.throttler.should_throttle_alert(alert).await {
             info!(
                 "Suppressed duplicate alert for rule {:?} from source IP {}",
                 alert.rule_id, alert.src_ip

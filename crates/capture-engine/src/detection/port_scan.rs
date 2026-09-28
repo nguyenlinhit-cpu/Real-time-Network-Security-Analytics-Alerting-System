@@ -69,7 +69,11 @@ impl DetectionRule for PortScanDetector {
 
         // UDP replies from well-known services (DNS, NTP…) to a client's ephemeral ports are not a
         // scan by the server.
-        if event.protocol == "UDP" && event.src_port > 0 && event.src_port < 1024 && event.dst_port >= 1024 {
+        if event.protocol == "UDP"
+            && event.src_port > 0
+            && event.src_port < 1024
+            && event.dst_port >= 1024
+        {
             return None;
         }
 
