@@ -134,7 +134,12 @@ impl NotificationChannel for EmailChannel {
                     Ok(())
                 }
                 Err(e) => {
-                    let msg = format!("SMTP delivery failed: {}", e);
+                    let mut msg = format!("SMTP delivery failed: {}", e);
+                    if username.is_none() && msg.contains("530") {
+                        msg.push_str(
+                            " (server requires login: set SMTP username and password on this channel)",
+                        );
+                    }
                     warn!("{}", msg);
                     Err(AppError::Internal(msg))
                 }

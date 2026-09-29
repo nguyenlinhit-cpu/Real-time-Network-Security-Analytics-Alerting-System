@@ -21,7 +21,7 @@ pub fn SettingsPage() -> impl IntoView {
     let (webhook_url, set_webhook_url) = signal(String::new());
     let (tg_token, set_tg_token) = signal(String::new());
     let (tg_chat_id, set_tg_chat_id) = signal(String::new());
-    let (smtp_host, set_smtp_host) = signal(String::from("smtp.mailtrap.io"));
+    let (smtp_host, set_smtp_host) = signal(String::from("smtp.gmail.com"));
     let (smtp_port, set_smtp_port) = signal(String::from("587"));
     let (to_email, set_to_email) = signal(String::new());
     let (smtp_user, set_smtp_user) = signal(String::new());

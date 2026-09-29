@@ -39,10 +39,14 @@ fn build_channel(ch: &ChannelModel) -> Box<dyn NotificationChannel> {
                 .as_str()
                 .or_else(|| ch.config_json["password"].as_str())
                 .map(|s| s.to_string());
+            // Providers like Gmail reject or rewrite a From that isn't the authenticated
+            // account, so fall back to the SMTP username when it is an address.
             let from = ch.config_json["from_email"]
                 .as_str()
-                .unwrap_or("noreply@secnet.local")
-                .to_string();
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| s.to_string())
+                .or_else(|| username.clone().filter(|u| u.contains('@')))
+                .unwrap_or_else(|| "noreply@secnet.local".to_string());
             Box::new(EmailChannel {
                 name: ch.name.clone(),
                 smtp_host: host,
