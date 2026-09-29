@@ -195,15 +195,180 @@ nix develop --command cargo test --test benchmark_evaluation_test -- --nocapture
 
 ## 🚀 7. Hướng dẫn Khởi chạy & Triển khai
 
-### Cách 1: Khởi chạy 1 lệnh duy nhất với Docker Compose (Khuyên dùng)
+> Người dùng **Windows** xem hướng dẫn riêng: [`WINDOWS_DOCKER_GUIDE.md`](WINDOWS_DOCKER_GUIDE.md).
+
+### Cách 1: Chạy toàn bộ bằng Docker Compose trên NixOS / Linux (Khuyên dùng)
+
+Không cần cài Rust, Trunk hay PostgreSQL trên máy. Mọi thứ được biên dịch và chạy trong container.
+
+#### Bước 1: Bật Docker trên NixOS
+
+Thêm vào `/etc/nixos/configuration.nix`:
+
+```nix
+virtualisation.docker.enable = true;
+
+users.users.<tên_user>.extraGroups = [ "docker" ];   # chạy docker không cần sudo
+```
+
+Áp dụng cấu hình, rồi **đăng xuất và đăng nhập lại** để nhóm `docker` có hiệu lực:
+
+```bash
+sudo nixos-rebuild switch
+```
+
+Kiểm tra (NixOS đã kèm sẵn plugin `docker compose` v2):
+
+```bash
+docker version          # phải hiện cả Client và Server
+docker compose version
+id -nG                  # phải có "docker"
+```
+
+> Trên Linux khác (Ubuntu, Debian, Fedora…): cài Docker Engine + Compose plugin theo https://docs.docker.com/engine/install/, rồi chạy `sudo usermod -aG docker $USER`.
+
+#### Bước 2: Lấy mã nguồn và tạo file `.env` (tuỳ chọn)
+
+```bash
+git clone <url-repo> Real-time-Network-Security-Analytics-Alerting-System
+cd Real-time-Network-Security-Analytics-Alerting-System
+cp .env.example .env    # tuỳ chọn: không có .env thì docker-compose.yml dùng giá trị mặc định
+```
+
+Các biến quan trọng trong `.env` (đều có mặc định an toàn cho môi trường dev):
+
+| Biến | Mặc định | Ý nghĩa |
+|---|---|---|
+| `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | `postgres` / `postgres` / `network_security` | Tài khoản CSDL TimescaleDB |
+| `POSTGRES_PORT` | `5432` | Cổng CSDL mở ra máy host (chỉ `127.0.0.1`) |
+| `REDIS_PASSWORD` | `secnet_redis_dev_password` | Mật khẩu Redis |
+| `JWT_SECRET` | chuỗi dev | **Bắt buộc đổi khi `ENVIRONMENT=production`** (`openssl rand -hex 32`) |
+| `SIMULATION_MODE` | `true` | `true` = sinh lưu lượng giả lập; `false` = bắt gói tin thật |
+| `DEMO_SCENARIO` | `all` | Kịch bản tấn công giả lập (xem Bước 6) |
+| `AUTO_BLOCK_CRITICAL_IPS` | `true` | Tự chặn IP gây cảnh báo Critical |
+
+> Các biến `SMTP_*`, `TELEGRAM_*`, `WEBHOOK_DEFAULT_URL` trong `.env.example` **không được dùng**. Kênh thông báo được cấu hình trên giao diện web (xem Bước 5).
+
+#### Bước 3: Build và khởi chạy
+
 ```bash
 docker compose up -d --build
 ```
-Hệ thống sẽ tự động:
-1. Khởi động TimescaleDB và Redis (ràng buộc an toàn vào `127.0.0.1`).
-2. Tự động áp dụng các migration CSDL khi backend khởi động (`sqlx::migrate!`, nguồn duy nhất — backend dừng nếu migration lỗi).
-3. Khởi chạy Capture Engine ở chế độ simulator hoặc live capture.
-4. Mở web qua Nginx TLS tại `https://localhost` (chứng chỉ tự ký), hoặc `http://localhost:3000` chỉ từ chính máy chủ. API: `http://127.0.0.1:8080`.
+
+Lần đầu mất khoảng 5–15 phút để tải image và biên dịch Rust ở chế độ release. Các lần sau nhanh hơn nhờ cache. Lệnh này khởi động **6 container** trong mạng `secnet_mesh`:
+
+| Container | Cổng trên máy host | Chức năng |
+|---|---|---|
+| `secnet_timescaledb` | `127.0.0.1:5432` | PostgreSQL 15 + TimescaleDB 2.14.2 |
+| `secnet_redis` | `127.0.0.1:6379` | Cache / throttling cảnh báo phân tán |
+| `secnet_backend` | `127.0.0.1:8080` | REST API Axum + WebSocket. Tự chạy toàn bộ migration (kèm dữ liệu mẫu và tài khoản) khi khởi động |
+| `secnet_frontend` | `127.0.0.1:3000` | Dashboard Leptos WASM phục vụ bởi Nginx |
+| `secnet_nginx_tls` | `0.0.0.0:80`, `0.0.0.0:443` | Reverse proxy TLS. Tự sinh chứng chỉ tự ký vào `deploy/nginx/certs/` lần đầu. Cổng 80 chuyển hướng sang 443 |
+| `secnet_capture_engine` | (nội bộ) | Bắt gói tin / giả lập tấn công, chạy 8 luật phát hiện |
+
+#### Bước 4: Kiểm tra trạng thái
+
+```bash
+docker compose ps
+curl http://127.0.0.1:8080/health     # {"service":"secnet-backend","status":"ok"}
+```
+
+Mọi container phải ở trạng thái `Up`. `timescaledb`, `redis`, `backend`, `frontend` hiển thị thêm `(healthy)`.
+
+#### Bước 5: Truy cập web và đăng nhập
+
+| Thành phần | URL | Ghi chú |
+|---|---|---|
+| **Dashboard (HTTPS)** | https://localhost | Qua Nginx TLS. Dùng được từ máy khác trong mạng: `https://<IP-máy-chủ>` |
+| **Dashboard (HTTP)** | http://localhost:3000 | Chỉ truy cập được từ chính máy chạy Docker |
+| **Swagger UI** | http://localhost:8080/swagger-ui/ | Tắt khi `ENVIRONMENT=production` (trừ khi `ENABLE_SWAGGER=true`) |
+| **Prometheus metrics** | http://localhost:8080/metrics | Đặt `METRICS_TOKEN` để yêu cầu Bearer token |
+
+Chứng chỉ HTTPS là tự ký nên trình duyệt sẽ cảnh báo. Trên Firefox chọn **Advanced… → Accept the Risk and Continue**, trên Chrome chọn **Advanced → Proceed to localhost (unsafe)**.
+
+Mở nhanh từ terminal: `firefox https://localhost &`
+
+**🔑 Tài khoản có sẵn** (tạo bởi migration `20260101000011_seed_sample_data.sql`):
+
+| Vai trò | Username | Mật khẩu | Quyền |
+|---|---|---|---|
+| **Admin** | `admin` | `Admin@SecNet2026!` | Toàn quyền: luật phát hiện, kênh thông báo, blocklist, audit log |
+| **Analyst** | `analyst` hoặc `analyst_linh` | `Analyst@SecNet2026!` | Xác nhận / đóng / mở lại sự cố, xem blocklist (chỉ đọc) |
+| **Viewer** | `viewer` hoặc `viewer_demo` | `Viewer@SecNet2026!` | Chỉ xem |
+
+**Tài khoản CSDL / Redis** (chỉ mở trên `127.0.0.1`):
+
+| Dịch vụ | Kết nối |
+|---|---|
+| PostgreSQL | `postgres://postgres:postgres@localhost:5432/network_security` (hoặc `docker exec -it secnet_timescaledb psql -U postgres -d network_security`) |
+| Redis | `redis://:secnet_redis_dev_password@localhost:6379` |
+
+> ⚠️ Đây là mật khẩu dùng cho dev/demo. Khi triển khai thật, đổi mật khẩu các tài khoản web, `POSTGRES_PASSWORD`, `REDIS_PASSWORD`, `JWT_SECRET` và đặt `ENVIRONMENT=production`. Tài khoản tự đăng ký trên trang web luôn có vai trò `Viewer`.
+
+#### Bước 6: Cấu hình gửi cảnh báo qua Email (Gmail)
+
+1. Bật **Xác minh 2 bước** cho tài khoản Gmail dùng để gửi.
+2. Tạo **App Password** tại https://myaccount.google.com/apppasswords (16 ký tự).
+3. Đăng nhập `admin`, vào mục **Alert channels** ở thanh bên trái, bấm **Add channel**, chọn Channel type **Email (SMTP)**, điền rồi bấm **Save channel**:
+
+| Ô | Giá trị |
+|---|---|
+| SMTP Host | `smtp.gmail.com` |
+| Port | `587` |
+| Connection security | `STARTTLS (587/2525)` |
+| Username | Địa chỉ Gmail gửi, đầy đủ `@gmail.com` |
+| Password | App Password 16 ký tự, viết liền (**không** phải mật khẩu Gmail) |
+| From address | Để trống (hệ thống dùng Username) |
+| Recipient Email (To) | Hộp thư nhận cảnh báo (mỗi kênh một địa chỉ) |
+
+4. Bấm **Send test alert** để kiểm tra. Lỗi `530 Authentication required` nghĩa là thiếu Username/Password; lỗi `535` nghĩa là sai App Password. Giao diện chưa có chức năng sửa kênh, muốn đổi cấu hình thì xoá kênh rồi tạo lại.
+
+#### Bước 7: Chọn kịch bản tấn công giả lập
+
+Mặc định (`DEMO_SCENARIO=all`) capture-engine luân phiên đủ 8 kịch bản. Để chạy một kịch bản cố định:
+
+```bash
+DEMO_SCENARIO=syn_flood docker compose up -d capture-engine
+```
+
+Giá trị hợp lệ: `all`, `none`, `port_scan`, `syn_flood`, `brute_force`, `arp_spoof`, `dns_tunneling`, `volume_spike`, `icmp_flood`, `beaconing`.
+
+#### Kiểm thử toàn bộ tính năng trên hệ thống đang chạy
+
+Script `scripts/test_system.ps1` (Windows gọi qua `test.bat`) kiểm tra khoảng 90 mục: container, API, web, TLS, CSDL, đăng nhập, RBAC, WebSocket, phát hiện tấn công, luật, blocklist, kênh thông báo. Mô tả chi tiết ở mục 7 của [`WINDOWS_DOCKER_GUIDE.md`](WINDOWS_DOCKER_GUIDE.md). Trên NixOS chạy bằng PowerShell 7:
+
+```bash
+nix shell nixpkgs#powershell --command pwsh -File scripts/test_system.ps1                      # nhanh (~1 phút)
+nix shell nixpkgs#powershell --command pwsh -File scripts/test_system.ps1 -SendNotifications   # + gửi thật qua kênh đang bật
+nix shell nixpkgs#powershell --command pwsh -File scripts/test_system.ps1 -Full                # + cargo test trong Docker
+```
+
+Kết quả được lưu vào `test_report.txt`.
+
+#### Bước 8: Các lệnh quản lý thường dùng
+
+```bash
+docker compose logs -f                    # log toàn hệ thống
+docker compose logs -f backend            # log backend (xem lỗi gửi email tại đây)
+docker compose logs -f capture-engine     # log bắt gói / phát hiện
+docker compose restart backend            # khởi động lại một dịch vụ
+docker compose up -d --build backend frontend   # build lại sau khi sửa code
+docker compose stop                       # tạm dừng (giữ dữ liệu)
+docker compose start                      # chạy lại
+docker compose down                       # xoá container (giữ dữ liệu trong volume)
+docker compose down -v                    # xoá cả CSDL, lần chạy sau nạp lại dữ liệu mẫu
+```
+
+#### Xử lý sự cố trên NixOS / Linux
+
+| Triệu chứng | Cách xử lý |
+|---|---|
+| `permission denied while trying to connect to the Docker daemon socket` | User chưa ở nhóm `docker`: thêm vào `extraGroups`, `nixos-rebuild switch`, đăng xuất rồi đăng nhập lại |
+| `Cannot connect to the Docker daemon` | `sudo systemctl start docker` (kiểm tra `virtualisation.docker.enable = true`) |
+| `port is already allocated` (5432 / 6379 / 8080 / 80 / 443) | Tắt dịch vụ đang chiếm cổng (`sudo ss -ltnp \| grep :5432`), hoặc đổi `POSTGRES_PORT` / `REDIS_PORT` trong `.env` |
+| Không vào được `https://<IP>` từ máy khác | Mở tường lửa NixOS: `networking.firewall.allowedTCPPorts = [ 80 443 ];` |
+| Backend không lên, log báo lỗi migration | Xoá CSDL cũ và tạo lại: `docker compose down -v && docker compose up -d --build` |
+| Web hiển thị giao diện cũ sau khi build lại | Tải lại trang bỏ cache: `Ctrl+Shift+R` |
 
 ### Cách 2: Chạy trực tiếp qua Nix Flake (Development)
 ```bash

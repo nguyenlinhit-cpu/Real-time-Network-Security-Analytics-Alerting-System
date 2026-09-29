@@ -30,7 +30,7 @@ if not exist .env (
     copy .env.example .env >nul
 )
 
-echo [*] Đang build và khởi chạy toàn bộ 4 dịch vụ (TimescaleDB, Backend, Frontend, Capture Engine)...
+echo [*] Đang build và khởi chạy toàn bộ 6 dịch vụ (TimescaleDB, Redis, Backend, Frontend, Nginx TLS, Capture Engine)...
 docker compose up --build -d
 
 if %errorlevel% neq 0 (

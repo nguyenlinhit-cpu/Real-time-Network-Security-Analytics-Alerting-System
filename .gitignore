@@ -7,3 +7,4 @@ deploy/nginx/certs/
 secnet_rules_state.json
 dist/
 crates/frontend/dist/
+test_report.txt

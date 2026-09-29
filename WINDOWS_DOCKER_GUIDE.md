@@ -1,202 +1,389 @@
-# 🐳 Hướng Dẫn Khởi Chạy SecNet Bằng Hoàn Toàn Docker Trên Windows
+# 🐳 Hướng Dẫn Khởi Chạy SecNet Bằng Docker Trên Windows
 
-Tài liệu này hướng dẫn chi tiết từng bước cách cài đặt, đóng gói và khởi chạy toàn bộ hệ thống **Real-time Network Security Analytics & Alerting System (SecNet)** trên hệ điều hành **Windows 10 / 11** chỉ với **Docker Desktop**, không cần cài đặt Rust, Nix hay bất kỳ công cụ phát triển nào khác.
+Tài liệu này hướng dẫn từng bước cài đặt và chạy toàn bộ hệ thống **Real-time Network Security Analytics & Alerting System (SecNet)** trên **Windows 10 / 11** chỉ với **Docker Desktop**. Không cần cài Rust, Nix, Trunk hay PostgreSQL. Toàn bộ mã nguồn được biên dịch bên trong container.
+
+> Người dùng NixOS / Linux xem mục **7. Hướng dẫn Khởi chạy** trong [`README.md`](README.md).
 
 ---
 
-## 🏛️ 1. Kiến trúc Các Dịch vụ Trong Docker
+## 🏛️ 1. Các Dịch Vụ Trong Docker
 
-Hệ thống được đóng gói thành **4 container độc lập**, tự động kết nối qua mạng nội bộ `secnet_mesh`:
+`docker compose` khởi động **6 container**, kết nối với nhau qua mạng nội bộ `secnet_mesh`:
 
-| Container Name | Image / Base | Cổng Expose trên Windows | Chức năng chính |
+| Container | Image / Nền tảng | Cổng trên Windows | Chức năng |
 |---|---|---|---|
-| **`secnet_timescaledb`** | `timescale/timescaledb:latest-pg15` | `5432:5432` | Lưu trữ Time-series Hypertables (`traffic_events`), dữ liệu người dùng, cấu hình luật và nhật ký sự cố. Tự động nạp 11 migrations khi khởi tạo. |
-| **`secnet_backend`** | `secnet-backend:latest` (Rust/Debian) | `8080:8080` | REST API Axum, WebSocket Hub (`/ws/alerts`, `/ws/traffic`), xác thực JWT Argon2id, hệ thống phát cảnh báo đa kênh. |
-| **`secnet_frontend`** | `secnet-frontend:latest` (Nginx/WASM) | `3000:80` | Dashboard SOC hiện đại viết bằng Leptos 0.7 WebAssembly, Nginx reverse-proxy API & WebSockets. |
-| **`secnet_capture_engine`**| `secnet-capture:latest` (Rust/Pcap) | *Nội bộ* | Bộ bắt gói tin & giả lập tấn công mạng thời gian thực (Port Scan, SYN Flood, Brute-force, ARP Spoof, DNS Tunneling, Z-Score Spike). |
+| **`secnet_timescaledb`** | `timescale/timescaledb:2.14.2-pg15` | `127.0.0.1:5432` | PostgreSQL 15 + TimescaleDB: hypertable `traffic_events`, người dùng, luật, cảnh báo, audit log |
+| **`secnet_redis`** | `redis:7-alpine` | `127.0.0.1:6379` | Cache và chống bão cảnh báo (throttling) |
+| **`secnet_backend`** | Rust (Axum) | `127.0.0.1:8080` | REST API, WebSocket (`/ws/alerts`, `/ws/traffic`), JWT + Argon2id, gửi cảnh báo đa kênh. **Tự chạy 16 migration** (kèm dữ liệu mẫu và tài khoản đăng nhập) khi khởi động |
+| **`secnet_frontend`** | Nginx + Leptos WASM | `127.0.0.1:3000` | Giao diện SOC Dashboard |
+| **`secnet_nginx_tls`** | `nginx:alpine` | `80`, `443` | Reverse proxy HTTPS. Tự sinh chứng chỉ tự ký lần đầu. Cổng 80 tự chuyển sang 443 |
+| **`secnet_capture_engine`** | Rust (pnet/pcap) | *nội bộ* | Bắt gói tin / giả lập 8 kịch bản tấn công, chạy luật phát hiện theo MITRE ATT&CK |
+
+Các cổng có tiền tố `127.0.0.1` chỉ truy cập được từ chính máy Windows đó. Máy khác trong mạng LAN truy cập qua `https://<IP-máy-Windows>`.
 
 ---
 
-## 💻 2. Yêu cầu Tiên Quyết Trên Windows
+## 💻 2. Chuẩn Bị Trên Windows
 
-1. **Hệ điều hành**: Windows 10 (64-bit: Home/Pro/Enterprise build 19041+) hoặc Windows 11.
-2. **Cài đặt Docker Desktop**:
-   - Tải bộ cài chính thức tại: [https://www.docker.com/products/docker-desktop/](https://www.docker.com/products/docker-desktop/)
-   - Trong quá trình cài đặt, tích chọn **"Use WSL 2 instead of Hyper-V (recommended)"**.
-   - Khởi động lại máy tính nếu được yêu cầu.
-   - Bật Docker Desktop và đợi đến khi biểu tượng cá voi ở góc thanh tác vụ chuyển sang màu xanh lá (*Engine running*).
+### 2.1. Yêu cầu hệ thống
 
----
+- Windows 10 64-bit (build 19041 trở lên) hoặc Windows 11.
+- RAM tối thiểu 8 GB (khuyến nghị 16 GB). Lần build đầu dùng nhiều RAM để biên dịch Rust.
+- Ổ đĩa còn trống khoảng 15 GB.
+- Bật ảo hoá (Virtualization) trong BIOS. Kiểm tra: **Task Manager → Performance → CPU → Virtualization: Enabled**.
 
-## 🚀 3. Các Bước Khởi Chạy (1-Click / Terminal)
+### 2.2. Cài WSL 2
 
-### Cách A: Khởi chạy nhanh bằng File Script `.bat` (Khuyên dùng)
-Dự án đã tích hợp sẵn 2 file script tiện lợi cho Windows:
-1. Nhấp đúp chuột vào file **`start_docker.bat`** để tự động kiểm tra Docker, copy file `.env` và build/khởi chạy toàn bộ hệ thống.
-2. Để dừng hệ thống, nhấp đúp vào file **`stop_docker.bat`**.
+Mở **PowerShell (Run as Administrator)** và chạy:
 
----
-
-### Cách B: Khởi chạy bằng PowerShell / Command Prompt (CMD)
-
-#### Bước 1: Mở PowerShell hoặc Windows Terminal
-Nhấn phím `Windows`, gõ `PowerShell`, chuột phải chọn **Run as Administrator** (hoặc mở Windows Terminal bình thường).
-
-Di chuyển vào thư mục dự án:
 ```powershell
-cd "D:\du-an\Real-time-Network-Security-Analytics-&-Alerting-System"
+wsl --install
 ```
-*(Thay đường dẫn trên bằng đường dẫn thực tế chứa thư mục dự án trên máy của bạn).*
 
-#### Bước 2: Chuẩn bị file cấu hình môi trường `.env`
-Sao chép file cấu hình mẫu:
+Khởi động lại máy khi được yêu cầu. Nếu WSL đã có sẵn, cập nhật bằng:
+
+```powershell
+wsl --update
+```
+
+### 2.3. Cài Docker Desktop
+
+1. Tải tại https://www.docker.com/products/docker-desktop/
+2. Khi cài, tích chọn **"Use WSL 2 instead of Hyper-V (recommended)"**.
+3. Khởi động lại máy nếu được yêu cầu.
+4. Mở Docker Desktop, chấp nhận điều khoản, đợi góc dưới bên trái hiện **"Engine running"** (màu xanh).
+5. Kiểm tra trong PowerShell:
+   ```powershell
+   docker version
+   docker compose version
+   ```
+   Lệnh đầu phải hiện cả phần **Client** và **Server**.
+
+### 2.4. Cài Git và lấy mã nguồn
+
+1. Tải Git tại https://git-scm.com/download/win và cài với tuỳ chọn mặc định.
+2. **Trước khi clone**, cấu hình Git giữ nguyên ký tự xuống dòng `LF` (tránh lỗi script shell trong container):
+   ```powershell
+   git config --global core.autocrlf input
+   ```
+3. Clone dự án vào thư mục **không có dấu tiếng Việt và khoảng trắng**, ví dụ `D:\projects`:
+   ```powershell
+   cd D:\projects
+   git clone <url-repo> Real-time-Network-Security-Analytics-Alerting-System
+   cd Real-time-Network-Security-Analytics-Alerting-System
+   ```
+
+---
+
+## 🚀 3. Khởi Chạy Hệ Thống
+
+### Cách A: Dùng file `.bat` (nhanh nhất)
+
+1. Mở thư mục dự án trong File Explorer.
+2. Nhấp đúp **`start_docker.bat`**. Script sẽ:
+   - kiểm tra Docker đã cài và đang chạy,
+   - tạo file `.env` từ `.env.example` nếu chưa có,
+   - chạy `docker compose up --build -d`,
+   - mở trình duyệt tới http://localhost:3000,
+   - bấm phím bất kỳ để xem log trực tiếp (đóng cửa sổ log không làm dừng hệ thống).
+3. Để kiểm tra mọi tính năng đã hoạt động, nhấp đúp **`test.bat`** (xem mục 7).
+4. Để dừng và xoá container (vẫn giữ dữ liệu), nhấp đúp **`stop_docker.bat`**.
+
+### Cách B: Dùng PowerShell / Windows Terminal
+
+#### Bước 1: Mở PowerShell tại thư mục dự án
+
+```powershell
+cd D:\projects\Real-time-Network-Security-Analytics-Alerting-System
+```
+
+#### Bước 2: Tạo file cấu hình `.env` (tuỳ chọn)
+
 ```powershell
 copy .env.example .env
 ```
 
-#### Bước 3: Build và khởi chạy toàn bộ 4 dịch vụ
-Chạy lệnh Docker Compose:
+Không có `.env` thì `docker-compose.yml` dùng giá trị mặc định. Các biến quan trọng:
+
+| Biến | Mặc định | Ý nghĩa |
+|---|---|---|
+| `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | `postgres` / `postgres` / `network_security` | Tài khoản CSDL |
+| `POSTGRES_PORT` | `5432` | Cổng CSDL trên Windows (đổi nếu máy đã cài PostgreSQL) |
+| `REDIS_PORT` | `6379` | Cổng Redis trên Windows |
+| `REDIS_PASSWORD` | `secnet_redis_dev_password` | Mật khẩu Redis |
+| `JWT_SECRET` | chuỗi dev | **Bắt buộc đổi khi `ENVIRONMENT=production`** |
+| `SIMULATION_MODE` | `true` | Sinh lưu lượng giả lập (nên giữ `true` trên Windows) |
+| `DEMO_SCENARIO` | `all` | Kịch bản tấn công giả lập (xem mục 6) |
+
+> Các biến `SMTP_*`, `TELEGRAM_*`, `WEBHOOK_DEFAULT_URL` trong `.env.example` **không được dùng**. Kênh thông báo được cấu hình trên giao diện web (xem mục 5).
+
+#### Bước 3: Build và chạy
+
 ```powershell
 docker compose up --build -d
 ```
-> **Lưu ý:** Lần chạy đầu tiên, Docker sẽ tự động tải các base image và biên dịch Rust Release nhị phân tối ưu. Quá trình này diễn ra hoàn toàn tự động trong container.
 
-#### Bước 4: Kiểm tra trạng thái hoạt động của các container
+Lần đầu mất khoảng **10–20 phút** (tải image + biên dịch Rust release). Các lần sau chỉ vài giây nhờ cache.
+
+#### Bước 4: Kiểm tra trạng thái
+
 ```powershell
 docker compose ps
 ```
-Kết quả hiển thị 4 container đều ở trạng thái `running` hoặc `healthy`:
+
+Kết quả mong đợi (6 container đều `Up`):
+
 ```
-NAME                    IMAGE                               COMMAND                  STATUS
-secnet_timescaledb      timescale/timescaledb:latest-pg15   "docker-entrypoint.s…"   running (healthy)
-secnet_backend          ...                                 "/app/backend"           running
-secnet_frontend         ...                                 "nginx -g 'daemon of…"   running
-secnet_capture_engine   ...                                 "/app/capture-engine"    running
+NAME                    STATUS
+secnet_backend          Up (healthy)
+secnet_capture_engine   Up
+secnet_frontend         Up (healthy)
+secnet_nginx_tls        Up
+secnet_redis            Up (healthy)
+secnet_timescaledb      Up (healthy)
 ```
 
----
-
-## 🌐 4. Địa Chỉ Truy Cập & Đăng Nhập Hệ Thống
-
-Mở bất kỳ trình duyệt nào trên Windows (Chrome, Edge, Firefox, Brave...):
-
-| Thành phần | Đường dẫn (URL) | Ghi chú |
-|---|---|---|
-| **Web SOC Dashboard** | [http://localhost:3000](http://localhost:3000) | Giao diện giám sát (HTTP, chỉ truy cập từ chính máy chạy Docker) |
-| **Web SOC Dashboard (TLS)** | [https://localhost](https://localhost) | Qua Nginx TLS, chứng chỉ tự ký — dùng khi truy cập từ máy khác |
-| **Swagger UI (API Docs)**| [http://localhost:8080/swagger-ui](http://localhost:8080/swagger-ui) | Tài liệu REST API (tắt khi `ENVIRONMENT=production`, trừ khi `ENABLE_SWAGGER=true`) |
-| **Prometheus Metrics** | [http://localhost:8080/metrics](http://localhost:8080/metrics) | Chỉ số giám sát (đặt `METRICS_TOKEN` để yêu cầu Bearer token) |
-
-### 🔑 Tài khoản đăng nhập có sẵn:
-
-| Vai trò | Tên đăng nhập (Username) | Mật khẩu (Password) | Quyền hạn |
-|---|---|---|---|
-| **Admin** | `admin` | `Admin@SecNet2026!` | Toàn quyền cấu hình luật, phân quyền, blocklist, kênh cảnh báo |
-| **Analyst** | `analyst_linh` *(hoặc `analyst`)* | `Analyst@SecNet2026!` | Xử lý sự cố, xác nhận / đóng / mở lại cảnh báo, xem blocklist (chỉ Admin được chặn/bỏ chặn IP) |
-| **Viewer** | `viewer_demo` *(hoặc `viewer`)* | `Viewer@SecNet2026!` | Xem báo cáo và biểu đồ giám sát (Read-only) |
-
----
-
-## 🧪 5. Kiểm Thử Giả Lập Tấn Công (Demo Attack Scenarios)
-
-Mặc định (`DEMO_SCENARIO=all`) capture-engine tự luân phiên đủ **8 kịch bản** tấn công, mỗi kịch bản cách nhau ~8 giây lưu lượng bình thường. Để chỉ chạy một kịch bản, đặt biến `DEMO_SCENARIO` rồi khởi động lại capture-engine:
+Kiểm tra API:
 
 ```powershell
-# 1. Giả lập tấn công Port Scan (Quét cổng hàng loạt)
-docker exec -it -e DEMO_SCENARIO=port_scan secnet_capture_engine /app/capture-engine
+curl.exe http://127.0.0.1:8080/health
+# {"service":"secnet-backend","status":"ok"}
+```
 
-# 2. Giả lập tấn công từ chối dịch vụ SYN Flood (DDoS)
-docker exec -it -e DEMO_SCENARIO=syn_flood secnet_capture_engine /app/capture-engine
+---
 
-# 3. Giả lập tấn công dò mật khẩu SSH/RDP Brute-force
-docker exec -it -e DEMO_SCENARIO=brute_force secnet_capture_engine /app/capture-engine
+## 🌐 4. Truy Cập Web & Tài Khoản Đăng Nhập
 
-# 4. Giả lập tấn công giả mạo địa chỉ ARP Poisoning / Spoofing
-docker exec -it -e DEMO_SCENARIO=arp_spoof secnet_capture_engine /app/capture-engine
+### 4.1. Địa chỉ truy cập
 
-# 5. Giả lập rò rỉ dữ liệu qua kênh ngầm DNS Tunneling
-docker exec -it -e DEMO_SCENARIO=dns_tunneling secnet_capture_engine /app/capture-engine
+| Thành phần | URL | Ghi chú |
+|---|---|---|
+| **Dashboard (HTTP)** | http://localhost:3000 | Dễ dùng nhất, chỉ từ chính máy Windows |
+| **Dashboard (HTTPS)** | https://localhost | Qua Nginx TLS. Máy khác trong LAN dùng `https://<IP-máy-Windows>` |
+| **Swagger UI** | http://localhost:8080/swagger-ui/ | Tài liệu REST API |
+| **Prometheus metrics** | http://localhost:8080/metrics | Chỉ số giám sát |
 
-# 6. Giả lập đột biến lưu lượng bất thường (Volume Anomaly Z-Score Spike)
-docker exec -it -e DEMO_SCENARIO=volume_spike secnet_capture_engine /app/capture-engine
+Khi mở HTTPS, trình duyệt cảnh báo vì chứng chỉ tự ký:
+- **Chrome / Edge:** bấm **Advanced → Continue to localhost (unsafe)**.
+- **Firefox:** bấm **Advanced… → Accept the Risk and Continue**.
 
-# 7. Giả lập ICMP Flood / Ping Flood
-docker exec -it -e DEMO_SCENARIO=icmp_flood secnet_capture_engine /app/capture-engine
+### 4.2. 🔑 Tài khoản đăng nhập web
 
-# 8. Giả lập C2 Beaconing (kết nối định kỳ ra máy chủ điều khiển)
-docker exec -it -e DEMO_SCENARIO=beaconing secnet_capture_engine /app/capture-engine
+| Vai trò | Username | Mật khẩu | Quyền hạn |
+|---|---|---|---|
+| **Admin** | `admin` | `Admin@SecNet2026!` | Toàn quyền: luật phát hiện, kênh thông báo, chặn/bỏ chặn IP, audit log |
+| **Analyst** | `analyst` hoặc `analyst_linh` | `Analyst@SecNet2026!` | Xác nhận / đóng / mở lại sự cố, xem blocklist (chỉ đọc) |
+| **Viewer** | `viewer` hoặc `viewer_demo` | `Viewer@SecNet2026!` | Chỉ xem dashboard và báo cáo |
 
-# Cách gọn hơn: chạy lại container với một kịch bản cố định
+Tài khoản tự đăng ký trên trang web luôn có vai trò `Viewer`.
+
+### 4.3. 🔑 Tài khoản CSDL & Redis
+
+| Dịch vụ | Thông tin kết nối |
+|---|---|
+| **PostgreSQL** | Host `localhost`, Port `5432`, User `postgres`, Password `postgres`, Database `network_security` |
+| Chuỗi kết nối | `postgres://postgres:postgres@localhost:5432/network_security` |
+| Mở psql trong container | `docker exec -it secnet_timescaledb psql -U postgres -d network_security` |
+| **Redis** | Host `localhost`, Port `6379`, Password `secnet_redis_dev_password` |
+
+Có thể kết nối PostgreSQL bằng DBeaver hoặc pgAdmin với thông tin trên.
+
+> ⚠️ Các mật khẩu trên chỉ dùng cho dev/demo. Khi triển khai thật, đổi mật khẩu tài khoản web, `POSTGRES_PASSWORD`, `REDIS_PASSWORD`, `JWT_SECRET` và đặt `ENVIRONMENT=production` trong `.env`.
+
+---
+
+## 📧 5. Cấu Hình Gửi Cảnh Báo Qua Email (Gmail)
+
+### 5.1. Tạo App Password cho Gmail
+
+1. Đăng nhập Gmail dùng để **gửi** cảnh báo.
+2. Bật **Xác minh 2 bước** tại https://myaccount.google.com/security
+3. Vào https://myaccount.google.com/apppasswords, đặt tên (ví dụ `SecNet`) và bấm **Create**.
+4. Sao chép mã **16 ký tự** Google hiển thị. Mã chỉ hiện một lần.
+
+### 5.2. Tạo kênh Email trên web
+
+Đăng nhập `admin`, vào mục **Alert channels** ở thanh bên trái, bấm **Add channel**, chọn Channel type **Email (SMTP)** và điền:
+
+| Ô | Giá trị |
+|---|---|
+| Channel name | tên tuỳ ý, ví dụ `gmail-soc` |
+| SMTP Host | `smtp.gmail.com` |
+| Port | `587` |
+| Connection security | `STARTTLS (587/2525)` |
+| Username | Địa chỉ Gmail gửi, đầy đủ, ví dụ `ten.cua.ban@gmail.com` |
+| Password | App Password 16 ký tự, viết liền không khoảng trắng (**không** phải mật khẩu Gmail) |
+| From address | Để trống (hệ thống tự dùng Username) |
+| Recipient Email (To) | Hộp thư nhận cảnh báo. Mỗi kênh một địa chỉ; muốn gửi nhiều nơi thì tạo nhiều kênh |
+| Minimum Severity | Mức cảnh báo tối thiểu để gửi |
+
+Bấm **Save channel**, rồi bấm **Send test alert** trên kênh vừa tạo và kiểm tra hộp thư (kể cả thư mục Spam).
+
+Dùng Outlook/Hotmail: SMTP Host `smtp-mail.outlook.com`, Port `587`, `STARTTLS`.
+
+### 5.3. Lỗi thường gặp khi gửi email
+
+Xem log: `docker compose logs -f backend`
+
+| Lỗi | Nguyên nhân | Cách xử lý |
+|---|---|---|
+| `530 5.7.1 Authentication required` | Kênh chưa có Username/Password | Tạo lại kênh, điền đủ Username và App Password |
+| `535 5.7.8 Username and Password not accepted` | Sai App Password hoặc dùng mật khẩu Gmail thường | Tạo App Password mới |
+| `Connection timed out` | Mạng/tường lửa chặn cổng 587 | Kiểm tra antivirus / tường lửa công ty |
+
+Giao diện chưa có chức năng sửa kênh. Muốn đổi cấu hình thì xoá kênh rồi tạo lại.
+
+---
+
+## 🧪 6. Chọn Kịch Bản Tấn Công Giả Lập
+
+Mặc định (`DEMO_SCENARIO=all`) capture-engine luân phiên đủ **8 kịch bản**, xen giữa bởi khoảng 8 giây lưu lượng bình thường. Để chạy một kịch bản cố định, trong PowerShell:
+
+```powershell
 $env:DEMO_SCENARIO="syn_flood"; docker compose up -d capture-engine
 ```
 
-Quan sát trên Dashboard `http://localhost:3000`: Cảnh báo và chuông báo động sẽ lập tức kích hoạt, biểu đồ lưu lượng và bảng Incidents tự động cập nhật theo thời gian thực!
+Quay lại chế độ luân phiên:
+
+```powershell
+$env:DEMO_SCENARIO="all"; docker compose up -d capture-engine
+```
+
+Hoặc sửa `DEMO_SCENARIO=...` trong `.env` rồi chạy `docker compose up -d capture-engine`.
+
+| Giá trị | Kịch bản | MITRE ATT&CK |
+|---|---|---|
+| `port_scan` | Quét cổng hàng loạt | T1046 |
+| `syn_flood` | SYN Flood / DDoS | T1498 |
+| `brute_force` | Dò mật khẩu SSH/RDP | T1110 |
+| `arp_spoof` | Giả mạo ARP | T1557 |
+| `dns_tunneling` | Rò rỉ dữ liệu qua DNS | T1071.004 |
+| `volume_spike` | Đột biến lưu lượng (Z-Score) | T1020 |
+| `icmp_flood` | ICMP / Ping Flood | T1498.001 |
+| `beaconing` | C2 Beaconing | T1071 |
+| `all` | Luân phiên cả 8 kịch bản | |
+| `none` | Chỉ lưu lượng bình thường | |
+
+Theo dõi trên Dashboard: cảnh báo, chuông báo động, biểu đồ lưu lượng và bảng Incidents cập nhật theo thời gian thực.
 
 ---
 
-## 🛠️ 6. Các Lệnh Quản Lý Thường Dùng Trên Windows
+## ✅ 7. Kiểm Thử Toàn Bộ Tính Năng (`test.bat`)
 
-- **Xem nhật ký hoạt động (Logs) của toàn hệ thống:**
-  ```powershell
-  docker compose logs -f
-  ```
-- **Xem nhật ký của riêng Backend:**
-  ```powershell
-  docker compose logs -f backend
-  ```
-- **Xem nhật ký của Capture Engine:**
-  ```powershell
-  docker compose logs -f capture-engine
-  ```
-- **Tạm dừng hệ thống:**
-  ```powershell
-  docker compose stop
-  ```
-- **Bật lại hệ thống sau khi dừng:**
-  ```powershell
-  docker compose start
-  ```
-- **Tắt và gỡ bỏ container:**
-  ```powershell
-  docker compose down
-  ```
-- **Xóa trắng cơ sở dữ liệu để chạy lại từ đầu:**
-  ```powershell
-  docker compose down -v
-  docker compose up --build -d
-  ```
+Sau khi hệ thống đã chạy (mục 3), nhấp đúp **`test.bat`** hoặc chạy trong CMD/PowerShell tại thư mục dự án:
+
+| Lệnh | Thời gian | Nội dung |
+|---|---|---|
+| `test.bat` | ~1 phút | Kiểm thử nhanh toàn bộ tính năng qua hệ thống đang chạy (bảng bên dưới) |
+| `test.bat notify` | ~1 phút | Như trên, **gửi thật** "test alert" qua mọi kênh thông báo đang bật (Email, Telegram, Slack, Webhook) |
+| `test.bat full` | 10–20 phút lần đầu | Như trên, chạy thêm bộ test Rust `cargo test --workspace` (unit, tích hợp, benchmark) trong container `rust:bookworm` |
+| `test.bat all` | | `notify` + `full` |
+
+Các nhóm kiểm thử:
+
+| # | Nhóm | Kiểm tra |
+|---|---|---|
+| 1 | Docker | Docker chạy, đủ 6 container ở trạng thái `running` / `healthy` |
+| 2 | Hạ tầng | `/health`, frontend `:3000`, proxy `/api`, chuyển hướng `:80 → 443`, HTTPS `:443`, Swagger, OpenAPI, `/metrics` |
+| 3 | CSDL | Đủ migration, `traffic_events` là hypertable, có 5 tài khoản mẫu và 8 luật, Redis trả `PONG` |
+| 4 | Xác thực | Đăng nhập 3 vai trò, sai mật khẩu, thiếu/giả token, refresh token (dùng 1 lần), đăng xuất thu hồi token, đăng ký luôn là `viewer` |
+| 5 | Dữ liệu | Dashboard, traffic (lọc giao thức), alerts (lọc mức độ, chi tiết, Inspect), nhãn MITRE, devices, sensor, rules, audit log, blocklist, xuất CSV |
+| 6 | Realtime | Lưu lượng mới được ghi, có cảnh báo trong 15 phút, WebSocket `/ws/traffic` và `/ws/alerts` (trực tiếp và qua proxy), từ chối token sai |
+| 7 | RBAC | Viewer/Analyst không xem audit log, không tạo luật, không chặn IP, không tạo kênh; Viewer không xử lý sự cố |
+| 8 | Sự cố | Analyst acknowledge → resolve, Admin reopen |
+| 9 | Luật | Tạo, đọc, sửa, từ chối trùng tên / không hợp lệ, xoá, audit log ghi nhận |
+| 10 | Blocklist | Chặn / bỏ chặn IP, từ chối IP sai định dạng và loopback |
+| 11 | Thông báo | Chống SSRF, tạo/sửa/xoá kênh, ẩn bí mật với non-admin, kênh email có đủ tài khoản SMTP, (tuỳ chọn) gửi thật |
+| 12 | Rust | `cargo test --workspace` với CSDL riêng `secnet_test` (tạo rồi xoá, không đụng dữ liệu đang chạy) |
+
+Kết quả từng mục hiện màu: **PASS** (đạt), **FAIL** (lỗi, kèm lý do), **WARN** (cần để ý), **SKIP** (bỏ qua). Báo cáo được lưu vào `test_report.txt`. Mọi dữ liệu test tạo ra (luật, IP chặn, kênh, tài khoản) đều được xoá sau khi chạy.
+
+Lưu ý:
+- Mỗi lượt test gọi đăng nhập/đăng ký 5 lần. Backend giới hạn 10 lần mỗi phút, nên nếu chạy liên tiếp nhiều lần, script sẽ tự chờ 60 giây rồi thử lại.
+- Mục 8 chuyển một cảnh báo đang mở qua acknowledged → resolved rồi mở lại, nên cảnh báo đó trở về trạng thái `open` như ban đầu.
+- Script chính nằm ở `scripts\test_system.ps1`. Có thể chạy trực tiếp: `powershell -ExecutionPolicy Bypass -File scripts\test_system.ps1 -Full -SendNotifications`.
 
 ---
 
-## ❓ 7. Xử Lý Các Vấn Đề Thường Gặp Trên Windows (Troubleshooting)
+## 🛠️ 8. Các Lệnh Quản Lý Thường Dùng
 
-### Vấn đề 1: "error during connect: This error may indicate that the docker daemon is not running"
-- **Nguyên nhân**: Ứng dụng Docker Desktop chưa được mở hoặc đang trong quá trình khởi động.
-- **Cách xử lý**: Mở Docker Desktop từ Start Menu, chờ biểu tượng chuyển sang trạng thái "Engine running", sau đó chạy lại lệnh.
+```powershell
+docker compose logs -f                   # log toàn hệ thống (Ctrl+C để thoát)
+docker compose logs -f backend           # log backend (lỗi gửi email, API)
+docker compose logs -f capture-engine    # log bắt gói / phát hiện tấn công
+docker compose restart backend           # khởi động lại một dịch vụ
+docker compose up -d --build             # build lại sau khi cập nhật mã nguồn (git pull)
+docker compose stop                      # tạm dừng, giữ nguyên container và dữ liệu
+docker compose start                     # chạy lại sau khi stop
+docker compose down                      # xoá container, GIỮ dữ liệu CSDL
+docker compose down -v                   # xoá cả CSDL; lần chạy sau nạp lại dữ liệu mẫu và tài khoản mặc định
+```
 
-### Vấn đề 2: Lỗi trùng cổng (Port already in use: 5432 hoặc 8080 hoặc 3000)
-- **Nguyên nhân**: Trên máy Windows của bạn đã cài sẵn PostgreSQL (thường chiếm cổng 5432) hoặc có ứng dụng web khác đang chiếm cổng 8080/3000.
-- **Cách xử lý**:
-  1. Mở file `.env`.
-  2. Đổi cổng sang cổng khác, ví dụ:
-     ```env
-     POSTGRES_PORT=5433
-     SERVER_PORT=8081
-     ```
-  3. Trong `docker-compose.yml`, cập nhật port tương ứng hoặc tắt dịch vụ PostgreSQL cục bộ trên Windows Services (`services.msc` -> tìm `postgresql-x64` -> nhấn *Stop*).
+Cập nhật lên phiên bản mới:
 
-### Vấn đề 3: Lỗi ký tự kết thúc dòng CRLF khi clone git trên Windows
-- **Nguyên nhân**: Windows tự động chuyển dấu xuống dòng `LF` thành `CRLF`, có thể gây lỗi cú pháp trong script Linux container.
-- **Cách xử lý**: Cấu hình Git giữ nguyên định dạng `LF`:
+```powershell
+git pull
+docker compose up -d --build
+```
+
+---
+
+## ❓ 9. Xử Lý Sự Cố Trên Windows
+
+### Vấn đề 1: `error during connect ... the docker daemon is not running`
+- **Nguyên nhân:** Docker Desktop chưa mở hoặc đang khởi động.
+- **Cách xử lý:** Mở Docker Desktop, đợi **"Engine running"** rồi chạy lại lệnh.
+
+### Vấn đề 2: `port is already allocated` / `Ports are not available`
+- **5432:** Máy đã cài PostgreSQL. Tắt service `postgresql-x64-*` trong `services.msc`, hoặc đặt `POSTGRES_PORT=5433` trong `.env`.
+- **6379:** Đặt `REDIS_PORT=6380` trong `.env`.
+- **80 / 443:** Thường do IIS, Skype hoặc XAMPP/Apache. Tắt IIS: `net stop w3svc` (PowerShell Admin), hoặc tắt Apache trong XAMPP.
+- **8080 / 3000:** Tìm tiến trình chiếm cổng rồi tắt nó:
+  ```powershell
+  netstat -ano | findstr :8080
+  taskkill /PID <PID> /F
+  ```
+
+Sau khi đổi, chạy lại `docker compose up -d`.
+
+### Vấn đề 3: Container `secnet_nginx_tls` báo lỗi `/entrypoint.sh: not found` hoặc `\r`
+- **Nguyên nhân:** Git đã chuyển `LF` thành `CRLF` khi clone.
+- **Cách xử lý:**
   ```powershell
   git config --global core.autocrlf input
+  git rm --cached -r .
+  git reset --hard
+  docker compose up -d --build
   ```
 
-### Vấn đề 4: Docker Desktop chiếm nhiều dung lượng RAM (Vmmem)
-- **Cách xử lý**: Bạn có thể giới hạn tài nguyên cho WSL2 bằng cách tạo file `C:\Users\<Tên_User>\.wslconfig` với nội dung:
+### Vấn đề 4: Build bị dừng với lỗi `killed` / `signal: 9` / hết bộ nhớ
+- **Nguyên nhân:** WSL 2 thiếu RAM khi biên dịch Rust.
+- **Cách xử lý:** Tạo file `C:\Users\<Tên_User>\.wslconfig`:
   ```ini
   [wsl2]
-  memory=4GB
+  memory=6GB
   processors=4
+  swap=4GB
   ```
-  Sau đó mở PowerShell chạy: `wsl --shutdown` và mở lại Docker Desktop.
+  Chạy `wsl --shutdown`, mở lại Docker Desktop và build lại.
+
+### Vấn đề 5: Docker Desktop chiếm nhiều RAM (tiến trình `Vmmem`) khi không dùng
+- Chạy `docker compose stop` hoặc giới hạn RAM như Vấn đề 4.
+
+### Vấn đề 6: Đăng nhập báo sai mật khẩu với tài khoản mặc định
+- Kiểm tra đúng chữ hoa và ký tự `@`, `!`: `Admin@SecNet2026!`.
+- Nếu CSDL cũ đã bị sửa, reset về dữ liệu mẫu (**mất toàn bộ dữ liệu**):
+  ```powershell
+  docker compose down -v
+  docker compose up -d --build
+  ```
+
+### Vấn đề 7: Máy khác trong LAN không vào được `https://<IP-máy-Windows>`
+- Mở cổng trong Windows Defender Firewall (PowerShell Admin):
+  ```powershell
+  New-NetFirewallRule -DisplayName "SecNet HTTPS" -Direction Inbound -Protocol TCP -LocalPort 80,443 -Action Allow
+  ```
+- Xem IP máy bằng `ipconfig` (dòng IPv4 Address).
+
+### Vấn đề 8: Giao diện không đổi sau khi build lại
+- Tải lại trang bỏ cache: `Ctrl + Shift + R` (hoặc `Ctrl + F5`).
